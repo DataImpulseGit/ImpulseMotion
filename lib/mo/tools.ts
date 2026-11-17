@@ -224,6 +224,7 @@ export async function creatives(ctx: MoToolContext, a: Args): Promise<ToolResult
     count: items.length, total: res.total,
     items: items.map((it) => ({ adId: it.adId, name: shortName(it.name), format: it.format, status: it.status, launched: it.launched, campaign: it.campaign, metrics: it.metrics, ...(it.title ? { title: it.title } : {}), ...(it.landing ? { landing: it.landing } : {}) })),
     account_total: frMetrics(res.benchmark, cur),
+    ...(platforms.includes("google") ? { google_scope: GOOGLE_SCOPE } : {}),
     data_until: res.coverage.until, coverage,
   };
 }
@@ -246,6 +247,12 @@ export function shortName(name: string): string {
 }
 
 const GROUPS = { campaign: "campaign", adset: "adset", format: "format", platform: null } as const;
+
+/**
+ * The warehouse is ad-level and Performance Max has no ads: a Google total summed from it
+ * is NOT the account's total (Decathlon Travel, 16/11/2026: 9 376 € shown for 14 688 € spent).
+ */
+const GOOGLE_SCOPE = "Google = annonces seulement (Recherche, Display, Vidéo) : Performance Max n'est PAS comptée, ce n'est donc pas le total du compte Google. Dis-le dès que tu cites un total ou une évolution qui inclut Google ; pour le total réel du compte, interroge Google Ads en direct.";
 
 /** The client's figures over a period, against the previous period of the same length: a KPI card, and a table by campaign / ad set / format when asked. */
 export async function metrics(ctx: MoToolContext, a: Args): Promise<ToolResult> {
@@ -275,7 +282,7 @@ export async function metrics(ctx: MoToolContext, a: Args): Promise<ToolResult> 
   if (m.cpm) main.push({ label: "CPM", value: money(m.cpm, cur), ...delta(m.cpm, p?.cpm, true) });
   if (m.impressions) main.push({ label: "Impressions", value: int(m.impressions), ...delta(m.impressions, p?.impressions) });
   const platformLabel = platforms.map((q) => q === "meta" ? "Meta" : q === "google" ? "Google" : q === "tiktok" ? "TikTok" : q).join(" + ");
-  const subtitle = `${platformLabel} · ${client.name} · ${range.since} → ${range.until}${compare ? ` · vs ${compare.since} → ${compare.until}` : ""}`;
+  const subtitle = `${platformLabel}${platforms.includes("google") ? " (hors Performance Max)" : ""} · ${client.name} · ${range.since} → ${range.until}${compare ? ` · vs ${compare.since} → ${compare.until}` : ""}`;
   const cards: MoCardSpec[] = [{ type: "kpis", clientId: client.id, clientName: client.name, title: str(a.title, 90) || `${client.name} — ${range.label}`, subtitle, items: main.slice(0, 8) }];
   let rows: Array<Record<string, string>> = [];
   if (by && res.rows.length) {
@@ -290,6 +297,7 @@ export async function metrics(ctx: MoToolContext, a: Args): Promise<ToolResult> 
     ...(posted.length ? { posted_cards: posted, posted: "Les cartes sont DÉJÀ sur le tableau : ne les recopie pas, dis juste la phrase (la conclusion, un ou deux chiffres)." } : {}),
     ...(a.post === false ? { card_specs: cards } : {}),
     totals: Object.fromEntries(main.map((k) => [k.label, `${k.value}${k.delta ? ` (${k.delta})` : ""}`])),
+    ...(platforms.includes("google") ? { google_scope: GOOGLE_SCOPE } : {}),
     ...(rows.length ? { rows } : {}), data_until: res.coverage.until,
     coverage: res.coverage.complete ? "complète" : res.coverage.errors ? `données jusqu'au ${res.coverage.until ?? "?"} (dernière synchronisation en échec)` : res.coverage.loading ? "synchronisation en cours" : "partielle",
   };
