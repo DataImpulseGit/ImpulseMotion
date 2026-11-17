@@ -13,6 +13,8 @@
  * in one place and the flows can be tested with fakes.
  */
 
+import { creativeFigures } from "@/lib/mo/monthly";
+import { applyMonthlyEdit, capitalize, monthLabel, monthlyChecks, sanitizeMonthlyCreative, type MonthlyDoc, type MonthlyEdit } from "@/lib/mo/monthly";
 import { applySheetEdit, SHEET_PALETTE, styleResolver, visibleRows, type SheetEdit } from "@/lib/mo/sheet";
 import type { XlsxStyles } from "@/lib/xlsx";
 import { CARD_SIZES, COL_GAP, type MoActionKind, type MoCard, type MoCardSpec, type MoCreative, type MoVerdict } from "@/lib/mo/model";
@@ -36,7 +38,11 @@ export type ActRequest =
   /** « Exporter en Google Sheet » : the rows of a table / KPI / creatives card become a Sheet in the Drive, its link lands on the card. */
   | { action: "sheet"; cardId: string; said?: string }
   /** A table card worked by hand like a spreadsheet: sort, filters, colours, cell edits, rows and columns (lib/mo/sheet.ts). */
-  | { action: "table"; cardId: string; edit: SheetEdit };
+  | { action: "table"; cardId: string; edit: SheetEdit }
+  /** The monthly workshop (lib/mo/monthly.ts): a text, a verdict, a creative removed — or one dropped in from a creatives card (`from`). */
+  | { action: "monthly"; cardId: string; edit: MonthlyEdit; from?: { cardId: string; item: number; section: string; at?: number } }
+  /** « Publier en Google Slides » : the deck of a monthly card, in the client's Drive. */
+  | { action: "monthly_publish"; cardId: string };
 
 const CARD_ID_RE = /^[a-z0-9]{3,24}$/i;
 const CLIENT_ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
@@ -91,6 +97,24 @@ export function parseActRequest(body: unknown): ActRequest | { error: string } {
       const bad = needCard(); if (bad) return bad;
       const primaryText = str(b.primaryText, 2000); const headline = str(b.headline, 255); const linkUrl = str(b.linkUrl, 2000);
       return { action: "publish_confirm", cardId, ...(primaryText ? { primaryText } : {}), ...(headline ? { headline } : {}), ...(linkUrl ? { linkUrl } : {}) };
+    }
+    case "monthly": {
+      const cardId = str(b.cardId, 24);
+      if (!CARD_ID_RE.test(cardId)) return { error: "Carte inconnue." };
+      const edit = b.edit && typeof b.edit === "object" ? (b.edit as MonthlyEdit) : {};
+      if (JSON.stringify(edit).length > 60_000) return { error: "Modification trop grosse." };
+      const f = b.from && typeof b.from === "object" ? (b.from as Record<string, unknown>) : null;
+      if (f) {
+        const from = { cardId: str(f.cardId, 24), item: idx(f.item), section: str(f.section, 24), at: idx(f.at) };
+        if (!CARD_ID_RE.test(from.cardId) || from.item === null || !from.section) return { error: "Créa à déposer illisible." };
+        // A creative dropped in is read from its card on the server: nothing of it comes from the browser.
+        return { action: "monthly", cardId, edit: {}, from: { cardId: from.cardId, item: from.item, section: from.section, ...(from.at !== null ? { at: from.at } : {}) } };
+      }
+      return { action: "monthly", cardId, edit: { ...edit, addCreative: undefined, deck: undefined } };
+    }
+    case "monthly_publish": {
+      const cardId = str(b.cardId, 24);
+      return CARD_ID_RE.test(cardId) ? { action: "monthly_publish", cardId } : { error: "Carte inconnue." };
     }
     case "table": {
       const cardId = str(b.cardId, 24);
@@ -292,7 +316,7 @@ const shortLabel = (s: string, max = 60) => (s.length > max ? s.slice(0, max - 1
 
 type ToolResult = Record<string, unknown>;
 
-export interface ActClient extends IntentClient { clientId: string; dashboardId: string | null; hqSlug?: string | null }
+export interface ActClient extends IntentClient { clientId: string; dashboardId: string | null; hqSlug?: string | null; aliasIds?: string[] }
 
 export interface ActDeps {
   loadCards(): Promise<MoCard[]>;
@@ -321,6 +345,8 @@ export interface ActDeps {
   sheetFolder(dashboardId: string | null): Promise<{ id: string } | null>;
   /** lib/clients/drive createSheetFromRows */
   createSheet(folderId: string, name: string, columns: string[], rows: SheetCell[][], look?: { styles?: XlsxStyles; autoFilter?: boolean }): Promise<{ id: string; webViewLink: string | null }>;
+  /** lib/mo/monthly-deck + Drive: the deck of a monthly, built and uploaded as Google Slides into the client's « Monthly » folder (or « Mo – Monthly » under the root). */
+  publishMonthly(doc: MonthlyDoc, dashboardId: string | null): Promise<{ link: string; slides: number; missingVisuals: number }>;
 }
 
 export interface ActResult {
@@ -550,6 +576,46 @@ export async function runMoAct(req: ActRequest, deps: ActDeps, who: string): Pro
       });
       // Not journaled: a sort or a colour is not an event of the day.
       return { say: "", cardIds: [card.id], ...(updated ? { card: updated } : {}) };
+    }
+
+    case "monthly": {
+      const card = find(req.cardId);
+      if (!card || card.type !== "monthly") throw new ActError("Ce monthly n'est plus sur le tableau.", 404);
+      let edit: MonthlyEdit = req.edit;
+      let dropped: string | null = null;
+      if (req.from) {
+        const src = find(req.from.cardId);
+        const item = src?.type === "creatives" ? src.items[req.from.item] : undefined;
+        if (!item) throw new ActError("Cette créa n'est plus sur le tableau.", 404);
+        const section = card.doc.sections.find((s) => s.id === req.from!.section);
+        if (!section || section.kind !== "creatives") throw new ActError("Dépose la créa dans une section « Créas » du monthly.", 400);
+        // Its figures: the spend, the account's cost, then attention — four at most (the card of the deck shows no more).
+        const metrics = creativeFigures(item.metrics);
+        const platform = /^\/api\/mo\/ad-image\/(meta|google|tiktok|linkedin)\//.exec(item.image ?? "")?.[1] ?? section.platform;
+        const creative = sanitizeMonthlyCreative({ name: item.name, image: item.image, adId: item.adId && !item.adId.startsWith("adlib:") ? item.adId : undefined, assetId: item.assetId, platform, metrics, badge: item.verdict === "keep" ? "winner" : item.verdict === "cut" ? "cut" : undefined });
+        if (!creative) throw new ActError("Cette créa ne peut pas entrer dans le monthly.", 400);
+        edit = { addCreative: { section: section.id, creative, ...(req.from.at !== undefined ? { at: req.from.at } : {}) } };
+        dropped = creative.name;
+      }
+      const updated = await deps.rewriteCard(card.id, (c) => (c.type === "monthly" ? ({ ...c, doc: applyMonthlyEdit(c.doc, edit) } as MoCard) : c));
+      if (dropped) await deps.journal({ kind: "monthly", clientId: card.doc.clientId, cardIds: [card.id], label: `${shortLabel(dropped)} ajoutée au monthly ${card.doc.clientName}` });
+      return { say: "", cardIds: [card.id], ...(updated ? { card: updated } : {}) };
+    }
+
+    case "monthly_publish": {
+      const card = find(req.cardId);
+      if (!card || card.type !== "monthly") throw new ActError("Ce monthly n'est plus sur le tableau.", 404);
+      const blocking = monthlyChecks(card.doc).filter((c) => c.level === "block");
+      if (blocking.length) throw new ActError(`Avant de publier : ${blocking[0].message}`, 409);
+      const client = clients.find((c) => c.id === card.doc.clientId || c.clientId === card.doc.clientId || c.aliasIds?.includes(card.doc.clientId)) ?? null;
+      let out: { link: string; slides: number; missingVisuals: number };
+      try { out = await deps.publishMonthly(card.doc, client?.dashboardId ?? null); } catch (e) { throw new ActError(`Le deck n'a pas pu être publié : ${toolErrorMessage(e)}`, 502); }
+      const at = new Date().toISOString();
+      const updated = await deps.rewriteCard(card.id, (c) => (c.type === "monthly" ? ({ ...c, doc: applyMonthlyEdit(c.doc, { deck: { link: out.link, at } }), link: out.link, linkLabel: "Google Slides", at } as MoCard) : c));
+      const name = `${card.doc.clientName} — ${capitalize(monthLabel(card.doc.month))}`;
+      await deps.journal({ kind: "monthly", clientId: card.doc.clientId, cardIds: [card.id], label: `Monthly ${name} publié en Google Slides (${out.slides} slides)` });
+      const warn = monthlyChecks(card.doc).length;
+      return { say: `Le monthly est dans Google Slides, ${out.slides} slides${out.missingVisuals ? `, ${out.missingVisuals} visuel${out.missingVisuals > 1 ? "s" : ""} à ajouter à la main` : ""}${warn ? `. La relecture signale encore ${warn} point${warn > 1 ? "s" : ""}` : ""}.`, cardIds: [card.id], ...(updated ? { card: updated } : {}) };
     }
 
     case "upload": {

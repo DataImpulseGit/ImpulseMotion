@@ -11,9 +11,10 @@
  */
 
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { Globe } from "lucide-react";
+import { Globe, Presentation } from "lucide-react";
 import { MoBrowserBody } from "@/components/mo/browser-body";
 import { SheetTable } from "@/components/mo/sheet-table";
+import { CREATIVE_DRAG_TYPE, MonthlyCardBody, type MonthlyOp } from "@/components/mo/monthly-card";
 import type { SheetEdit } from "@/lib/mo/sheet";
 import { ArrowDownRight, ArrowUpRight, BarChart3, Check, ChevronDown, ChevronUp, ExternalLink, FileSpreadsheet, FileText, FileUp, Frame, HardDrive, Image as ImageIcon, LayoutGrid, Link2, Loader2, MessageCircleQuestion, Minus, Rocket, RotateCcw, Send, StickyNote, Table2, TrendingUp, X } from "lucide-react";
 import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
@@ -26,7 +27,7 @@ import { CardActions, VerdictBadge, actionForKey, actionsFor, type CreativeActio
 
 const SERIES_COLORS = ["var(--ui-accent-ink)", "#f0abfc", "#67e8f9", "#fde68a", "#86efac", "#fca5a5"];
 
-const ICONS = { kpis: LayoutGrid, table: Table2, chart: TrendingUp, creatives: ImageIcon, note: StickyNote, ask: MessageCircleQuestion, file: FileUp, action: Send, frame: Frame, browser: Globe } as const;
+const ICONS = { kpis: LayoutGrid, table: Table2, chart: TrendingUp, creatives: ImageIcon, note: StickyNote, ask: MessageCircleQuestion, file: FileUp, action: Send, frame: Frame, browser: Globe, monthly: Presentation } as const;
 
 /** What the page is doing on this card right now (a spinner on the button): `item:<index>:<action>`, `confirm` or `sheet`. */
 export type CardBusy = string | null;
@@ -65,6 +66,8 @@ export interface MoCardViewProps {
   onConfirmPublish?: (id: string, edits: PublishEdits) => void;
   /** A table card worked like a spreadsheet: a sort, a filter, a colour, a cell edit (lib/mo/sheet.ts). */
   onTableEdit?: (id: string, edit: SheetEdit) => void;
+  /** The monthly workshop: an edit, a creative dropped in, the publication (components/mo/monthly-card.tsx). */
+  onMonthly?: (id: string, op: MonthlyOp) => void;
   /** « Google Sheet » in the header of a table / KPI / creatives card (or S on the selected card). */
   onCardAction?: (id: string, action: WholeCardAction) => void;
   busy?: CardBusy;
@@ -94,7 +97,7 @@ export function Handle({ dir, cls, cursor, cardId, getK, onStart, onResize, onEn
   return <div data-handle={dir} data-card-id={cardId} className={`absolute z-10 ${cls} ${cursor} touch-none`} {...drag} />;
 }
 
-export const MoCardView = memo(function MoCardView({ card, fresh, delayMs = 0, selected, refTitle, getK, onMove, onMoveEnd, onResizeStart, onResize, onResizeEnd, onFront, onSelect, onToggle, onClose, onFocusRef, onHoverRef, onAnswer, onItemAction, onItemHover, onConfirmPublish, onTableEdit, onCardAction, busy = null }: MoCardViewProps) {
+export const MoCardView = memo(function MoCardView({ card, fresh, delayMs = 0, selected, refTitle, getK, onMove, onMoveEnd, onResizeStart, onResize, onResizeEnd, onFront, onSelect, onToggle, onClose, onFocusRef, onHoverRef, onAnswer, onItemAction, onItemHover, onConfirmPublish, onTableEdit, onMonthly, onCardAction, busy = null }: MoCardViewProps) {
   const el = useRef<HTMLDivElement>(null);
   const Icon = ICONS[card.type] ?? BarChart3;
   const h = card.minimized ? MIN_HEADER_H : card.h ?? CARD_SIZES[card.type].h;
@@ -164,7 +167,8 @@ export const MoCardView = memo(function MoCardView({ card, fresh, delayMs = 0, s
             <CardBody card={card} width={width} selected={selected} busy={busy} onAnswer={onAnswer ? (opt) => onAnswer(card.id, opt) : undefined}
               onItemAction={onItemAction ? (i, a) => onItemAction(card.id, i, a) : undefined} onItemHover={onItemHover ? (i) => onItemHover(card.id, i) : undefined}
               onConfirmPublish={onConfirmPublish ? (edits) => onConfirmPublish(card.id, edits) : undefined}
-              onTableEdit={onTableEdit ? (edit) => onTableEdit(card.id, edit) : undefined} />
+              onTableEdit={onTableEdit ? (edit) => onTableEdit(card.id, edit) : undefined}
+              onMonthly={onMonthly ? (op) => onMonthly(card.id, op) : undefined} />
           </div>
           <div className="flex items-center gap-2 px-3.5 py-1.5 border-t border-ui-line text-[10px] text-ui-muted select-none">
             <span className="truncate" title={card.subtitle ?? ""}>{card.subtitle || "Source non précisée"}</span>
@@ -264,19 +268,20 @@ function relativeTime(iso: string): string {
   return new Date(t).toLocaleDateString("fr-FR", { day: "numeric", month: "short" });
 }
 
-function CardBody({ card, width, selected, busy, onAnswer, onItemAction, onItemHover, onConfirmPublish, onTableEdit }: { card: MoCard; width: number; selected: boolean; busy: CardBusy; onAnswer?: (option: string) => void; onItemAction?: (index: number, action: CreativeAction) => void; onItemHover?: (index: number | null) => void; onConfirmPublish?: (edits: PublishEdits) => void; onTableEdit?: (edit: SheetEdit) => void }) {
+function CardBody({ card, width, selected, busy, onAnswer, onItemAction, onItemHover, onConfirmPublish, onTableEdit, onMonthly }: { card: MoCard; width: number; selected: boolean; busy: CardBusy; onAnswer?: (option: string) => void; onItemAction?: (index: number, action: CreativeAction) => void; onItemHover?: (index: number | null) => void; onConfirmPublish?: (edits: PublishEdits) => void; onTableEdit?: (edit: SheetEdit) => void; onMonthly?: (op: MonthlyOp) => void }) {
   switch (card.type) {
     case "ask": return <Ask question={card.question} options={card.options} onAnswer={onAnswer} />;
     case "kpis": return <Kpis items={card.items} width={width} />;
     case "table": return <SheetTable card={card} active={selected} onEdit={onTableEdit} />;
     case "chart": return <Chart kind={card.kind} series={card.series} unit={card.unit} labels={card.x} width={width} />;
-    case "creatives": return <Creatives items={card.items} width={width} selected={selected} busy={busy} onAction={onItemAction} onHover={onItemHover} />;
+    case "creatives": return <Creatives cardId={card.id} items={card.items} width={width} selected={selected} busy={busy} onAction={onItemAction} onHover={onItemHover} />;
     case "note": return <AiMarkdown content={card.markdown} filesBase={null} className="prose-xs" />;
     case "file": return <FileBody card={card} />;
     case "action": return <PublishBody card={card} busy={busy === "confirm"} onConfirm={onConfirmPublish} />;
     // Frames are drawn by MoFrameView (components/mo/frame.tsx), never as a card body.
     case "frame": return null;
     case "browser": return <MoBrowserBody selected={selected} />;
+    case "monthly": return <MonthlyCardBody card={card} publishing={busy === "monthly_publish"} onOp={onMonthly} />;
   }
 }
 
@@ -443,7 +448,7 @@ export function CreativeImage({ src, alt, ratio = "aspect-[4/5]" }: { src: strin
 
 const isTyping = () => { const el = document.activeElement as HTMLElement | null; return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable); };
 
-function Creatives({ items, width, selected, busy, onAction, onHover }: { items: Extract<MoCard, { type: "creatives" }>["items"]; width: number; selected: boolean; busy: CardBusy; onAction?: (index: number, action: CreativeAction) => void; onHover?: (index: number | null) => void }) {
+function Creatives({ cardId, items, width, selected, busy, onAction, onHover }: { cardId: string; items: Extract<MoCard, { type: "creatives" }>["items"]; width: number; selected: boolean; busy: CardBusy; onAction?: (index: number, action: CreativeAction) => void; onHover?: (index: number | null) => void }) {
   const cols = width < 420 ? 1 : width < 560 ? 2 : 3;
   const [hot, setHot] = useState<number | null>(null);
   const hotRef = useRef<number | null>(null);
@@ -468,6 +473,8 @@ function Creatives({ items, width, selected, busy, onAction, onHover }: { items:
     <div className="grid gap-2.5" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
       {items.map((it, i) => (
         <div key={i} data-item={i} data-item-verdict={it.verdict ?? undefined} tabIndex={onAction ? 0 : undefined}
+          // A visual can be dragged into a monthly card (components/mo/monthly-card.tsx): it carries its card and its place, nothing else.
+          draggable onDragStart={(e) => { e.stopPropagation(); e.dataTransfer.setData(CREATIVE_DRAG_TYPE, JSON.stringify({ cardId, index: i })); e.dataTransfer.setData("text/plain", it.name); e.dataTransfer.effectAllowed = "copy"; }}
           onMouseEnter={() => setHover(i)} onMouseLeave={() => { if (hotRef.current === i) setHover(null); }} onFocus={() => setHover(i)} onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null) && hotRef.current === i) setHover(null); }}
           className={`group relative rounded-xl overflow-hidden border bg-ui-raised outline-none focus-visible:ring-2 focus-visible:ring-ui-accent/40 ${it.verdict === "keep" ? "border-emerald-400/40" : it.verdict === "cut" ? "border-ui-line opacity-60" : hot === i && selected ? "border-ui-accent" : "border-ui-line"}`}>
           <div className="relative">

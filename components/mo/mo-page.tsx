@@ -33,6 +33,8 @@ import { WaveCanvas, type WaveMood } from "@/components/mo/wave-canvas";
 import { useVoice } from "@/components/mo/use-voice";
 import { CARD_SIZES, COL_GAP, type MoBoardData, type MoCard, type MoCardPatch, type MoCardSpec } from "@/lib/mo/model";
 import { applySheetEdit, type SheetEdit } from "@/lib/mo/sheet";
+import { applyMonthlyEdit } from "@/lib/mo/monthly";
+import type { MonthlyOp } from "@/components/mo/monthly-card";
 import { MAX_UPLOAD_BYTES, cardClientOf, fileKindOf, isSheetCard, type SheetCard } from "@/lib/mo/act";
 import { GRID, SNAP_SCREEN_PX, arrangeCards, linkAnchors, linkPath, rectOf, resizeRect, snapMove, topZ, type ArrangeLayout, type Guide, type HandleDir, type Rect } from "@/lib/mo/geometry";
 
@@ -809,6 +811,17 @@ export function MoPage() {
       .catch(() => setError("Le tableau n'a pas pu être enregistré."));
   }, []);
 
+  /** The monthly workshop: a text or a verdict is shown at once then saved in order; a dropped creative and the publication go through `act` (the server reads the creative, builds the deck). */
+  const onMonthly = useCallback((cardId: string, op: MonthlyOp) => {
+    const b = boardStateRef.current; if (!b) return;
+    if ("publish" in op) { void act({ action: "monthly_publish", cardId }, { cardId, key: "monthly_publish" }); return; }
+    if ("from" in op) { void act({ action: "monthly", cardId, from: op.from }, { cardId, key: "monthly_drop" }); return; }
+    setBoard((bb) => (bb ? { ...bb, cards: bb.cards.map((c): MoCard => (c.id === cardId && c.type === "monthly" ? { ...c, doc: applyMonthlyEdit(c.doc, op.edit) } : c)) } : bb));
+    tableSaves.current = tableSaves.current.then(() => fetch(`/api/mo/${b.id}/act`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "monthly", cardId, edit: op.edit }) }))
+      .then((res) => { if (res instanceof Response && !res.ok) setError("Le monthly n'a pas pu être enregistré."); })
+      .catch(() => setError("Le monthly n'a pas pu être enregistré."));
+  }, [act]);
+
   const onConfirmPublish = useCallback((cardId: string, edits: PublishEdits) => { void act({ action: "publish_confirm", cardId, ...edits }, { cardId, key: "confirm" }); }, [act]);
   /** « Google Sheet » in a card's header (or S on the selected card): its rows exported, the link lands on the card. */
   const onCardAction = useCallback((cardId: string, action: WholeCardAction) => { if (action === "sheet") void act({ action: "sheet", cardId }, { cardId, key: "sheet" }); }, [act]);
@@ -1047,7 +1060,7 @@ export function MoPage() {
           <MoCardView key={c.id} card={c} fresh={fresh.has(c.id)} delayMs={(freshOrder.get(c.id) ?? 0) * 60} selected={selected.has(c.id)} refTitle={c.ref ? titles.get(c.ref) ?? null : null} getK={getK}
             onMove={onMove} onMoveEnd={onMoveEnd} onResizeStart={onResizeStart} onResize={onResize} onResizeEnd={onResizeEnd}
             onFront={onFront} onSelect={onSelect} onToggle={onToggle} onClose={onClose} onFocusRef={onFocusRef} onHoverRef={onHoverRef} onAnswer={onAnswer}
-            onItemAction={onItemAction} onItemHover={onItemHover} onConfirmPublish={onConfirmPublish} onTableEdit={onTableEdit} onCardAction={onCardAction} busy={acting?.cardId === c.id ? acting.key : null} />
+            onItemAction={onItemAction} onItemHover={onItemHover} onConfirmPublish={onConfirmPublish} onTableEdit={onTableEdit} onMonthly={onMonthly} onCardAction={onCardAction} busy={acting?.cardId === c.id ? acting.key : null} />
         ))}
         {ghost && <MoGhostCard ghost={ghost} onRetry={() => { setGhost(null); void send(ghost.text); }} onClose={() => setGhost(null)} />}
         {uploads.map((up) => <MoUploadCard key={up.id} up={up} onClose={() => { if (up.preview) URL.revokeObjectURL(up.preview); setUploads((u) => u.filter((x) => x.id !== up.id)); }} />)}

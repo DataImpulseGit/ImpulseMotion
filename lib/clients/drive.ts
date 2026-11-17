@@ -138,6 +138,7 @@ export const CLIENT_SUBFOLDERS = {
   creas: { name: "Créas", description: "Créas du client : exports FigCraft (mise en page) et PhotoCraft (retouche), visuels générés ou déposés dans Mo. Dossier ImpulseMotion." },
   briefs: { name: "Briefs", description: "Briefs du client (PDF, Word) déposés par les consultants dans Mo. Dossier ImpulseMotion." },
   tables: { name: "Tableaux", description: "Tableaux exportés depuis Mo en Google Sheets (chiffres, KPI, créas). Dossier ImpulseMotion." },
+  monthly: { name: "Monthly", description: "Monthly du client préparés dans l'atelier monthly de Mo, publiés en Google Slides. Dossier ImpulseMotion." },
 } as const;
 
 export async function ensureClientSubfolder(dashboardId: string, kind: keyof typeof CLIENT_SUBFOLDERS): Promise<DriveFolderRef | null> {

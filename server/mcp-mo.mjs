@@ -67,6 +67,38 @@ server.registerTool("creatives", {
   },
 }, async (args) => call("creatives", args, 60_000));
 
+server.registerTool("monthly_start", {
+  title: "Préparer le monthly d'un client",
+  description: "Ouvre l'ATELIER MONTHLY d'un client pour un mois : pose sur le tableau une carte « monthly » avec les sections du deck (remise en contexte, vue globale, depuis le début de l'année, détail et créas par canal, budget & next steps), pré-remplies avec les chiffres du mois et les créas qui ont porté la dépense. La carte se pose toute seule : ne recopie rien. Ensuite demande le contexte du mois à la personne et rédige avec monthly_write. Lent (10 à 40 s) : préviens d'une phrase.",
+  inputSchema: {
+    client,
+    month: z.string().max(40).optional().describe("Le mois, comme dit (« octobre », « 2026-10 », « le mois dernier »). Défaut : le dernier mois complet."),
+    context: z.string().max(2000).optional().describe("Le contexte du mois si la personne l'a déjà donné (budget, lancements, offres, incidents)."),
+  },
+}, async (args) => call("monthly_start", args, 150_000));
+
+const monthlyLines = z.array(z.string().max(280)).max(6).optional();
+server.registerTool("monthly_write", {
+  title: "Écrire dans un monthly",
+  description: "Écrit dans une carte « monthly » du tableau ce que la personne demande : contexte, titres, learnings, next steps, budget, verdict des créas. Seul ce que tu donnes change. RÈGLES DE L'AGENCE : un titre = un MESSAGE avec un chiffre (« En octobre, un CPL 13 % sous l'objectif »), jamais un thème (« Performances Meta ») ; 3 learnings au plus par section, 2 lignes chacun, qui EXPLIQUENT (pourquoi, grâce à quelle action) sans recopier les chiffres du tableau ; 3 next steps au plus, chacun avec un verbe d'action, un chiffre, la campagne nommée et une date ; conséquences concrètes pour le client, pas de jargon ; jamais de tiret cadratin ; espace avant % et € ; virgule décimale. N'invente AUCUN chiffre : seulement ceux de la carte (liste des cartes à l'écran) et ce que dit la personne. Ne fixe jamais un budget toi-même : propose-le seulement si la personne l'a donné. Une créa ne se juge pas sur un ratio seul (CTR, hook) : la dépense et le KPI business d'abord. Sans contexte du mois, demande-le avant de rédiger les learnings.",
+  inputSchema: {
+    card: z.string().max(24).optional().describe("Id de la carte monthly (défaut : le dernier monthly du tableau)."),
+    context: z.string().max(2000).optional().describe("Contexte du mois, tel que la personne l'a dit."),
+    next_date: z.string().max(60).optional().describe("Date du prochain monthly."),
+    sections: z.array(z.object({
+      section: z.string().max(24).describe("Id de la section (contexte, global, annee, meta, creas-meta, google, suite…), donné dans la description de la carte."),
+      title: z.string().max(140).optional(),
+      previous: monthlyLines.describe("Section contexte : enseignements du monthly précédent."),
+      done: monthlyLines.describe("Section contexte : mis en place ce mois-ci."),
+      todo: monthlyLines.describe("Section contexte : reste à mettre en place."),
+      learnings: monthlyLines,
+      next_steps: monthlyLines,
+      budget: monthlyLines.describe("Section suite : budget du mois prochain, une ligne par levier."),
+      badges: z.array(z.object({ creative: z.string().max(80).describe("Nom (ou début du nom) de la créa."), badge: z.enum(["winner", "watch", "cut"]) })).max(8).optional().describe("Section créas : verdict de créas, seulement si la personne le donne."),
+    })).max(16).optional(),
+  },
+}, async (args) => call("monthly_write", args, 30_000));
+
 server.registerTool("table_format", {
   title: "Trier, filtrer, colorer un tableau",
   description: "Travaille une carte « table » du tableau comme un tableur, sur demande (« trie par dépense », « garde seulement Meta », « mets en vert les ROAS au-dessus de 3 », « dégradé sur le CPA ») : la carte est modifiée sur place, tu n'as RIEN à recopier. Les colonnes se nomment comme à l'écran. Pour une couleur de coût (CPA, CPL, CPC, CPM) haut = mauvais ; pour un ROAS, un CTR, des conversions haut = bon.",

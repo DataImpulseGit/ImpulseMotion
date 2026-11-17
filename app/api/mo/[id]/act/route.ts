@@ -13,6 +13,9 @@ import { requireStaff } from "@/lib/auth-helpers";
 import { getAccountScope } from "@/lib/scope";
 import { listClientRegistry } from "@/lib/clients/registry";
 import { createSheetFromRows, ensureClientSubfolder, ensureRootSubfolder, uploadToFolder } from "@/lib/clients/drive";
+import { GOOGLE_SLIDES_MIME, PPTX_MIME, buildMonthlyDeck, monthlyDeckName } from "@/lib/mo/monthly-deck";
+import { getMetaSystemToken } from "@/lib/meta-api";
+import { fetchLargeThumbnails } from "@/lib/ads-warehouse/meta";
 import { fetchImageBytes, mediaFileDataUri } from "@/lib/creas/media";
 import { openInEditor } from "@/lib/creas/open-editor";
 import { createBrandAsset, setAssetFeedback } from "@/lib/studio-assets";
@@ -67,9 +70,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       return got ? { buf: got.buf, mimeType: got.mediaType } : null;
     },
     adImageBytes: async (platform, adId) => {
-      const ad = await prisma.adCatalog.findFirst({ where: { platform, adId }, select: { imageUrl: true, thumbnailUrl: true } });
+      const ad = await prisma.adCatalog.findFirst({ where: { platform, adId }, select: { imageUrl: true, thumbnailUrl: true, creativeId: true } });
       const src = ad?.imageUrl || ad?.thumbnailUrl;
-      const got = src ? await fetchImageBytes(src) : null;
+      let got = src ? await fetchImageBytes(src) : null;
+      // A Meta link that expired: a fresh rendition of the creative (same repair as app/api/mo/ad-image).
+      if (!got && platform === "meta" && ad?.creativeId) {
+        const fresh = await fetchLargeThumbnails(getMetaSystemToken(), [ad.creativeId], Date.now() + 8000).then((m) => m.get(ad.creativeId!)).catch(() => undefined);
+        got = fresh ? await fetchImageBytes(fresh) : null;
+      }
       return got ? { buf: got.buf, mimeType: got.mediaType } : null;
     },
     driveUpload: async (dashboardId, folder, file) => {
@@ -80,6 +88,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     },
     sheetFolder: (dashboardId) => (dashboardId ? ensureClientSubfolder(dashboardId, "tables") : ensureRootSubfolder(MO_TABLES_ROOT_FOLDER.name, MO_TABLES_ROOT_FOLDER.description)),
     createSheet: (folderId, name, columns, rows, look) => createSheetFromRows(folderId, name, columns, rows, look),
+    publishMonthly: async (doc, dashboardId) => {
+      const folder = dashboardId ? await ensureClientSubfolder(dashboardId, "monthly") : await ensureRootSubfolder("Mo – Monthly", "Monthly préparés dans Mo pour des clients sans dossier Drive. Dossier ImpulseMotion.");
+      if (!folder) throw new Error("dossier Drive du client introuvable");
+      const deck = await buildMonthlyDeck(doc, async (c) => (c.assetId ? deps.assetBytes(c.assetId) : c.adId && c.platform ? deps.adImageBytes(c.platform, c.adId) : null));
+      // Same name = a new version of the same Google Slides: publishing again never leaves a duplicate in the Drive.
+      const up = await uploadToFolder(folder.id, { name: monthlyDeckName(doc), mimeType: PPTX_MIME, data: deck.pptx, convertTo: GOOGLE_SLIDES_MIME });
+      return { link: up.webViewLink ?? `https://docs.google.com/presentation/d/${up.id}/edit`, slides: deck.slides, missingVisuals: deck.missingVisuals };
+    },
   };
 
   const t0 = Date.now();

@@ -117,6 +117,7 @@ function fakeDeps(cards: MoCard[], over: Partial<ActDeps> = {}) {
     driveUpload: vi.fn(async () => ({ link: "https://drive.google.com/file/d/xyz" })),
     sheetFolder: vi.fn(async (dashboardId: string | null) => ({ id: dashboardId ? `tables_${dashboardId}` : "root_tables" })),
     createSheet: vi.fn(async () => ({ id: "sheet1", webViewLink: "https://docs.google.com/spreadsheets/d/sheet1/edit" })),
+    publishMonthly: vi.fn(async () => ({ link: "https://docs.google.com/presentation/d/deck1/edit", slides: 9, missingVisuals: 0 })),
     ...over,
   };
   return { deps, store };

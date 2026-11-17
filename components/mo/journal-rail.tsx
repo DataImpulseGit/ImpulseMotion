@@ -20,7 +20,7 @@ interface Props {
   className?: string;
 }
 
-const ICONS: Record<JournalKind, typeof Check> = { verdict: Check, creative_metrics: LayoutGrid, open_editor: PenTool, drive: HardDrive, competitor_ads: Search, publish_prepare: Send, publish_confirm: Send, upload: FileUp, sheet: FileSpreadsheet, cards: Sparkles };
+const ICONS: Record<JournalKind, typeof Check> = { verdict: Check, creative_metrics: LayoutGrid, open_editor: PenTool, drive: HardDrive, competitor_ads: Search, publish_prepare: Send, publish_confirm: Send, upload: FileUp, sheet: FileSpreadsheet, monthly: Send, cards: Sparkles };
 
 const shiftDay = (day: string, n: number) => { const d = new Date(`${day}T12:00:00`); d.setDate(d.getDate() + n); return localDay(d); };
 const dayLabel = (day: string) => { const today = localDay(); if (day === today) return "Aujourd'hui"; if (day === shiftDay(today, -1)) return "Hier"; return new Date(`${day}T12:00:00`).toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short" }); };

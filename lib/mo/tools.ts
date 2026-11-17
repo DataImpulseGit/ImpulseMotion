@@ -45,10 +45,12 @@ import { ownAdTemplateSource } from "@/lib/creas/templates";
 import { dataUriToRelayImage } from "@/lib/creas/media";
 import { relayUpload } from "@/lib/studio";
 import type { MoCard, MoCardSpec } from "@/lib/mo/model";
+import { creativeFigures, MONTHLY_BADGES, MONTHLY_LISTS, PLATFORM_LABELS, applyMonthlyEdit, capitalize, describeMonthly, lastCompleteMonth, monthLabel, monthRange, monthlyChecks, parseMonth, sanitizeMonthlyDoc, type MonthlyCreative, type MonthlyDoc, type MonthlyKpi, type MonthlyListKey, type MonthlySection, type MonthlyTable } from "@/lib/mo/monthly";
+import { parseDisplayNumber } from "@/lib/sheet-values";
 import type { Playbook, PlaybookCandidate } from "@/lib/creas/playbook-doc";
 import { brandPlaybook, factoryApprove, factoryGenerate, factoryPropose, factoryPublish, factoryVariations, type FactoryToolDeps } from "@/lib/mo/factory-tools";
 
-export const MO_TOOL_NAMES = ["creatives", "metrics", "creative_metrics", "generate_creatives", "meta_targets", "meta_publish_ad", "competitor_ads", "keep_template", "brand_playbook", "factory_propose", "factory_approve", "factory_generate", "factory_variations", "factory_publish", "table_format"] as const;
+export const MO_TOOL_NAMES = ["creatives", "metrics", "creative_metrics", "generate_creatives", "meta_targets", "meta_publish_ad", "competitor_ads", "keep_template", "brand_playbook", "factory_propose", "factory_approve", "factory_generate", "factory_variations", "factory_publish", "table_format", "monthly_start", "monthly_write"] as const;
 export type MoToolName = (typeof MO_TOOL_NAMES)[number];
 
 export interface MoToolContext {
@@ -188,7 +190,8 @@ export async function creatives(ctx: MoToolContext, a: Args): Promise<ToolResult
   const dir: "asc" | "desc" = a.order === "asc" || (a.order === undefined && (sortKey === "cpa" || sortKey === "launch")) ? "asc" : "desc";
   const limit = Math.min(24, Math.max(1, Math.round(num(a.limit) ?? 12)));
   const run = (withLaunch: boolean) => queryAds({
-    platforms, accountIds, accounts, range: { since: range.since, until: range.until }, groupBy: "ad",
+    // « creative » adds up the copies of one creative across ad sets (what a monthly judges); « ad » is each ad on its own.
+    platforms, accountIds, accounts, range: { since: range.since, until: range.until }, groupBy: a.group === "creative" ? "creative" : "ad",
     filters: { ...(withLaunch ? { launchedAfter: range.since, launchedBefore: range.until } : {}), ...(num(a.min_spend) ? { minSpend: num(a.min_spend)! } : {}), ...(str(a.name_contains) ? { nameContains: str(a.name_contains, 80) } : {}) },
     sort: { key: sortKey === "launch" ? "launch" : sortKey, dir }, limit,
   });
@@ -799,6 +802,8 @@ export async function runMoTool(ctx: MoToolContext, tool: string, args: unknown)
     case "competitor_ads": return competitorAds(ctx, a);
     case "keep_template": return keepTemplate(ctx, a);
     case "table_format": return tableFormat(ctx, a);
+    case "monthly_start": return monthlyStart(ctx, a);
+    case "monthly_write": return monthlyWrite(ctx, a);
     case "brand_playbook": return brandPlaybook(factoryDeps(ctx), a);
     case "factory_propose": return factoryPropose(factoryDeps(ctx), a);
     case "factory_approve": return factoryApprove(factoryDeps(ctx), a);
@@ -808,3 +813,137 @@ export async function runMoTool(ctx: MoToolContext, tool: string, args: unknown)
     default: throw new MoToolError(`Outil inconnu : ${tool}`, 404);
   }
 }
+
+// ── The monthly workshop (lib/mo/monthly.ts) ─────────────────────────────────
+
+type KpiSpec = Extract<MoCardSpec, { type: "kpis" }>;
+type TableSpec = Extract<MoCardSpec, { type: "table" }>;
+type CreativesSpec = Extract<MoCardSpec, { type: "creatives" }>;
+const specsOf = (r: ToolResult | null): MoCardSpec[] => (r && Array.isArray(r.card_specs) ? (r.card_specs as MoCardSpec[]) : []);
+/** « +12 % vs période préc. » → « +12 % » : the reference is said once, in the document's comparison label. */
+const shortDelta = (d: string | undefined) => (d ? d.replace(/\s*vs période préc\.?/i, "").replace(/^= ?/, "=").trim() : undefined);
+const kpisOf = (specs: MoCardSpec[]): MonthlyKpi[] => ((specs.find((c): c is KpiSpec => c.type === "kpis")?.items ?? []).slice(0, 8).map((k) => ({ label: k.label, value: k.value, ...(shortDelta(k.delta) ? { delta: shortDelta(k.delta)! } : {}), ...(k.tone ? { tone: k.tone } : {}) })));
+const tableOf = (specs: MoCardSpec[], title: RegExp, rows = 8, cols = 6): MonthlyTable | undefined => {
+  const t = specs.find((c): c is TableSpec => c.type === "table" && title.test(c.title));
+  return t && t.rows.length ? { columns: t.columns.slice(0, cols), rows: t.rows.slice(0, rows).map((r) => r.slice(0, cols)) } : undefined;
+};
+/**
+ * The creatives a monthly proposes for a channel: the ones that carry the spend (above 5 % of the creatives' spend,
+ * most spent first, four at most — one row of cards). The verdict stays the consultant's: no badge is set here.
+ */
+export function monthlyTopCreatives(items: CreativesSpec["items"], platform: string, minShare = 0.05, max = 4): MonthlyCreative[] {
+  const withSpend = items.map((it) => ({ it, spend: parseDisplayNumber(it.metrics["Dépense"] ?? "")?.value ?? 0 }));
+  const total = withSpend.reduce((n, x) => n + x.spend, 0);
+  const eligible = withSpend.filter((x) => total > 0 && x.spend / total >= minShare).sort((a, b) => b.spend - a.spend);
+  return (eligible.length ? eligible : withSpend.sort((a, b) => b.spend - a.spend)).slice(0, max)
+    .map(({ it }) => ({ name: it.name, ...(it.image ? { image: it.image } : {}), ...(it.adId ? { adId: it.adId } : {}), ...(it.assetId ? { assetId: it.assetId } : {}), platform, metrics: creativeFigures(it.metrics) }));
+}
+
+/**
+ * « Prépare le monthly d'octobre de Naturalia » : the monthly card of a client for a month, its sections pre-filled with
+ * the figures (all channels, since January, each channel by campaign) and the creatives that carried the spend.
+ * The messages are left to write — by the consultant, or by Mo with monthly_write once the context of the month is given.
+ */
+export async function monthlyStart(ctx: MoToolContext, a: Args): Promise<ToolResult> {
+  const { client } = await resolveClient(ctx, a.client);
+  const today = isoParis(new Date());
+  const month = (str(a.month, 40) ? parseMonth(str(a.month, 40), today) : null) ?? lastCompleteMonth(today);
+  if (month > today.slice(0, 7)) throw new MoToolError(`${capitalize(monthLabel(month))} n'a pas commencé.`);
+  const full = monthRange(month);
+  const range = { since: full.since, until: full.until > today ? shift(today, -1) : full.until };
+  if (range.until < range.since) throw new MoToolError(`${capitalize(monthLabel(month))} vient de commencer : pas encore de journée complète.`);
+  const platforms = [...new Set(client.accounts.map((x) => x.platform as string))].filter((p) => p in PLATFORM_LABELS);
+  if (!platforms.length) throw new MoToolError(`${client.name} n'a pas de compte publicitaire rattaché.`, 404);
+  const quiet = async (fn: () => Promise<ToolResult>): Promise<ToolResult | null> => { try { return await fn(); } catch (e) { console.warn("[mo/monthly]", e instanceof Error ? e.message : e); return null; } };
+  const base = { client: client.id, since: range.since, until: range.until, post: false };
+  const [overall, ytd, perPlatform] = await Promise.all([
+    quiet(() => metrics(ctx, { ...base, platform: "all" })),
+    month.endsWith("-01") ? Promise.resolve(null) : quiet(() => metrics(ctx, { ...base, since: `${month.slice(0, 4)}-01-01`, platform: "all", compare: false })),
+    Promise.all(platforms.map(async (pl) => ({
+      platform: pl,
+      figures: await quiet(() => metrics(ctx, { ...base, platform: pl, by: "campaign" })),
+      // Search ads have no visual: creatives are shown for the channels that have some.
+      creas: pl === "google" ? null : await quiet(() => creatives(ctx, { ...base, platform: pl, sort: "spend", limit: 12, group: "creative" })),
+    }))),
+  ]);
+  if (!overall && perPlatform.every((p) => !p.figures)) throw new MoToolError(`Je n'ai pas pu lire les chiffres de ${client.name} sur ${monthLabel(month)}.`, 502);
+  const days = Math.round((Date.parse(range.until) - Date.parse(range.since)) / 86_400_000) + 1;
+  const m = monthLabel(month);
+  const sections: MonthlySection[] = [{ id: "contexte", kind: "context", title: "Remise en contexte", lists: {} }];
+  const overallSpecs = specsOf(overall);
+  sections.push({ id: "global", kind: "overview", title: "Vue globale", kpis: kpisOf(overallSpecs), ...(tableOf(overallSpecs, /^Par plateforme/) ? { table: tableOf(overallSpecs, /^Par plateforme/)! } : {}), lists: {} });
+  if (ytd) sections.push({ id: "annee", kind: "ytd", title: "Depuis le début de l'année", kpis: kpisOf(specsOf(ytd)), ...(tableOf(specsOf(ytd), /^Par plateforme/) ? { table: tableOf(specsOf(ytd), /^Par plateforme/)! } : {}), lists: {} });
+  const missing: string[] = [];
+  for (const p of perPlatform) {
+    const name = PLATFORM_LABELS[p.platform];
+    const specs = specsOf(p.figures);
+    if (!specs.length) { missing.push(name); continue; }
+    sections.push({ id: p.platform, kind: "channel", platform: p.platform, title: `Détail ${name}`, kpis: kpisOf(specs), ...(tableOf(specs, /^Par campagne/) ? { table: tableOf(specs, /^Par campagne/)! } : {}), lists: {} });
+    const items = specsOf(p.creas).find((c): c is CreativesSpec => c.type === "creatives")?.items ?? [];
+    if (p.platform !== "google") sections.push({ id: `creas-${p.platform}`, kind: "creatives", platform: p.platform, title: `Créas ${name}`, creatives: monthlyTopCreatives(items, p.platform), lists: {} });
+  }
+  sections.push({ id: "suite", kind: "next", title: "Budget & next steps", lists: {} });
+  const doc = sanitizeMonthlyDoc({ clientId: client.id, clientName: client.name, month, period: range, compareLabel: `vs les ${days} jours précédents`, context: str(a.context, 2000), nextDate: "", sections });
+  if (!doc) throw new MoToolError("Le monthly n'a pas pu être préparé.", 500);
+  const spec: MoCardSpec = { type: "monthly", clientId: client.id, clientName: client.name, title: `Monthly ${client.name} — ${capitalize(m)}`, subtitle: `${range.since} → ${range.until} · ${doc.compareLabel}`, doc };
+  const posted = a.post !== false ? await postMoCards(ctx.boardId, [spec]) : [];
+  return {
+    client: { id: client.id, name: client.name }, month, period: range,
+    ...(posted.length ? { posted_card: posted[0], posted: "La carte « monthly » est DÉJÀ sur le tableau, avec ses chiffres et ses créas : ne la recopie pas." } : {}),
+    ...(a.post === false ? { card_specs: [spec] } : {}),
+    sections: doc.sections.map((s) => ({ id: s.id, kind: s.kind, ...(s.platform ? { platform: s.platform } : {}), kpis: s.kpis?.map((k) => `${k.label} ${k.value}${k.delta ? ` (${k.delta})` : ""}`), ...(s.creatives ? { creatives: s.creatives.map((c) => c.name) } : {}) })),
+    ...(missing.length ? { missing: `Chiffres non lus pour : ${missing.join(", ")} (dis-le).` } : {}),
+    next: "Demande à la personne le CONTEXTE du mois (ce qui a changé : budget, lancements, offres, incidents) et les next steps du mois précédent, puis rédige avec monthly_write. Elle peut glisser d'autres créas depuis une carte de créas, donner un verdict à chacune, et publier en Google Slides depuis la carte.",
+  };
+}
+
+const LIST_ARGS: Record<string, MonthlyListKey> = { previous: "previous", done: "done", todo: "todo", learnings: "learnings", next_steps: "nextSteps", budget: "budget" };
+
+/**
+ * Mo writes on a monthly card what the person asked for: the context, titles (a message, not a theme), learnings and
+ * next steps of sections, the verdict of creatives. Only what is given changes; the answer says what the review still flags.
+ */
+export async function monthlyWrite(ctx: MoToolContext, a: Args): Promise<ToolResult> {
+  const cardId = str(a.card, 24);
+  const board = await loadBoard(ctx.boardId, ctx.userId);
+  if (!board) throw new MoToolError("Tableau introuvable.", 404);
+  const monthlies = parseMoCards(board.cardsJson).filter((c): c is Extract<MoCard, { type: "monthly" }> => c.type === "monthly");
+  const card = monthlies.find((c) => c.id === cardId) ?? (cardId ? undefined : monthlies[monthlies.length - 1]);
+  if (!card) throw new MoToolError(cardId ? `La carte ${cardId} n'est pas un monthly.` : "Aucun monthly sur le tableau : prépare-le d'abord avec monthly_start.", 404);
+  let doc: MonthlyDoc = card.doc;
+  let changed = 0;
+  if (typeof a.context === "string" && a.context.trim()) { doc = applyMonthlyEdit(doc, { context: a.context }); changed++; }
+  if (typeof a.next_date === "string" && a.next_date.trim()) { doc = applyMonthlyEdit(doc, { nextDate: a.next_date }); changed++; }
+  const unknown: string[] = [];
+  for (const raw of (Array.isArray(a.sections) ? a.sections : []).slice(0, 16)) {
+    if (!raw || typeof raw !== "object") continue;
+    const x = raw as Args;
+    const section = doc.sections.find((s) => s.id === str(x.section, 24));
+    if (!section) { unknown.push(str(x.section, 24) || "?"); continue; }
+    if (typeof x.title === "string" && x.title.trim()) { doc = applyMonthlyEdit(doc, { title: { section: section.id, value: x.title } }); changed++; }
+    for (const [arg, key] of Object.entries(LIST_ARGS)) {
+      if (!Array.isArray(x[arg]) || !MONTHLY_LISTS[section.kind].includes(key)) continue;
+      doc = applyMonthlyEdit(doc, { list: { section: section.id, key, items: (x[arg] as unknown[]).map((v) => str(v, 280)) } }); changed++;
+    }
+    for (const b of (Array.isArray(x.badges) ? x.badges : []).slice(0, 8)) {
+      if (!b || typeof b !== "object") continue;
+      const bb = b as Args;
+      const list = doc.sections.find((s) => s.id === section.id)?.creatives ?? [];
+      const fold = (v: string) => v.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+      const index = list.findIndex((c) => fold(c.name).includes(fold(str(bb.creative, 80))) || c.adId === str(bb.creative, 60));
+      if (index < 0 || !(str(bb.badge, 10) in MONTHLY_BADGES)) continue;
+      doc = applyMonthlyEdit(doc, { badge: { section: section.id, index, badge: str(bb.badge, 10) as keyof typeof MONTHLY_BADGES } }); changed++;
+    }
+  }
+  if (!changed) throw new MoToolError(`Rien à écrire${unknown.length ? ` (sections inconnues : ${unknown.join(", ")})` : ""}. Sections du monthly : ${doc.sections.map((s) => s.id).join(", ")}.`);
+  const final = doc;
+  await rewriteMoCard(ctx.boardId, card.id, (c) => (c.type === "monthly" ? ({ ...c, doc: final, at: new Date().toISOString() } as MoCard) : c));
+  const checks = monthlyChecks(final);
+  return {
+    updated_card: card.id, written: changed, ...(unknown.length ? { unknown_sections: unknown } : {}),
+    review: checks.length ? checks.slice(0, 10).map((c) => `${c.level === "block" ? "BLOQUANT" : "à revoir"} — ${c.message}`) : "Rien à signaler par la relecture.",
+    note: "La carte est déjà à jour à l'écran : dis en une phrase ce que tu as écrit et ce qu'il reste à faire, ne recopie pas le monthly.",
+    monthly: describeMonthly(final).slice(0, 3000),
+  };
+}
+

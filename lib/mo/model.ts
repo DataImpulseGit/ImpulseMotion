@@ -9,8 +9,9 @@
  */
 
 import { sanitizeSheetView, type MoSheetView } from "@/lib/mo/sheet";
+import { describeMonthly, type MonthlyDoc } from "@/lib/mo/monthly";
 
-export type MoCardType = "kpis" | "table" | "chart" | "creatives" | "note" | "ask" | "file" | "action" | "frame" | "browser";
+export type MoCardType = "kpis" | "table" | "chart" | "creatives" | "note" | "ask" | "file" | "action" | "frame" | "browser" | "monthly";
 export type MoTone = "good" | "bad" | "neutral";
 /** The consultant's verdict on a visual: kept (green) or cut (grey). */
 export type MoVerdict = "keep" | "cut";
@@ -102,7 +103,9 @@ export type MoCardPayload =
   /** A client frame: a named zone of the board (lib/mo/frames.ts) the client's cards are laid in; never written by the model. */
   | { type: "frame"; clientId: string; clientName: string; color: string }
   /** The piloted browser (server/browser.mjs on the relay): a live view the consultant watches and can take over; laid by the application, never written by the model. */
-  | { type: "browser" };
+  | { type: "browser" }
+  /** The monthly workshop: a client's monthly report built on the board, published as Google Slides (lib/mo/monthly.ts); posted by Mo's tool, never written by the model. */
+  | { type: "monthly"; doc: MonthlyDoc };
 
 export type MoCard = MoCardBase & MoCardPayload;
 
@@ -116,8 +119,8 @@ export type MoCardUpdate = { id: string; title?: string; subtitle?: string } & (
 export interface MoCardPatch { x?: number; y?: number; w?: number; h?: number; z?: number; minimized?: boolean; removed?: boolean; /** Joins a frame (its id) or leaves it (null). */ frame?: string | null }
 
 /** What the consultant did on the board without the model (journal, lib/mo/act.ts). */
-export type MoActionKind = "verdict" | "creative_metrics" | "open_editor" | "drive" | "competitor_ads" | "publish_prepare" | "publish_confirm" | "upload" | "sheet";
-export const MO_ACTION_KINDS: readonly MoActionKind[] = ["verdict", "creative_metrics", "open_editor", "drive", "competitor_ads", "publish_prepare", "publish_confirm", "upload", "sheet"];
+export type MoActionKind = "verdict" | "creative_metrics" | "open_editor" | "drive" | "competitor_ads" | "publish_prepare" | "publish_confirm" | "upload" | "sheet" | "monthly";
+export const MO_ACTION_KINDS: readonly MoActionKind[] = ["verdict", "creative_metrics", "open_editor", "drive", "competitor_ads", "publish_prepare", "publish_confirm", "upload", "sheet", "monthly"];
 export interface MoActionMeta { kind: MoActionKind; clientId?: string; cardIds: string[]; label: string; at: string }
 
 export interface MoMessage {
@@ -201,6 +204,7 @@ export const CARD_SIZES: Record<MoCardType, { w: number; h: number }> = {
   action: { w: 560, h: 700 },
   frame: { w: 1168, h: 320 },
   browser: { w: 1040, h: 740 },
+  monthly: { w: 980, h: 1040 },
 };
 
 /**
@@ -532,6 +536,7 @@ export function describeCards(cards: MoCard[]): string {
       case "action": return ` — publication ${c.status === "sent" ? "envoyée (PAUSED)" : c.status === "failed" ? "en échec" : "à confirmer par la personne"} : ${c.adset} [asset ${c.assetId}]`;
       case "frame": return " — cadre client";
       case "browser": return " — navigateur piloté (outils browser) que la personne regarde en direct";
+      case "monthly": return ` — ATELIER MONTHLY (écris-y avec mo monthly_write, card = cet id) : ${describeMonthly(c.doc).slice(0, 2600)}`;
     }
   };
   const verdicts = (c: MoCard) => (c.type === "creatives" ? c.items.filter((it) => it.verdict).map((it) => `${it.name} ${it.verdict === "keep" ? "gardée" : "coupée"}`) : []);

@@ -30,6 +30,7 @@ export const MIN_SIZES: Record<MoCardType, { w: number; h: number }> = {
   action: { w: 400, h: 320 },
   frame: { w: 480, h: 200 },
   browser: { w: 560, h: 420 },
+  monthly: { w: 640, h: 480 },
 };
 export const MAX_SIZE = { w: 1600, h: 1400 };
 /** Frames may be wider and taller than cards (they hold them). */
