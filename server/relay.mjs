@@ -20,6 +20,7 @@ import * as hqOauth from "./hq-oauth.mjs";
 import { HOST_CREDENTIALS, startAuthWatch } from "./auth-watch.mjs";
 import { hqToolCall } from "./hq-client.mjs";
 import * as maxAccounts from "./max-accounts.mjs";
+import { createMcpPool, PoolTimeout } from "./mcp-pool.mjs";
 import * as voice from "./voice.mjs";
 import * as adlib from "./adlib.mjs";
 import * as gwsAuth from "./gws-auth.mjs";
@@ -698,8 +699,24 @@ Sois concis et direct.`;
 let cachedTools = null;
 let toolsLastFetched = 0;
 
+// Connections kept open to the MCP servers of /api/tool (server/mcp-pool.mjs): a direct call no
+// longer starts a `mcporter` process each time. MCP_POOL=0 goes back to the process for every call.
+const mcpPool = createMcpPool({
+  configPath: "/root/ImpulseMotion/config/mcporter.json",
+  rootDir: "/root/ImpulseMotion",
+  enabled: process.env.MCP_POOL !== "0",
+  log: (...a) => console.log("[mcp-pool]", ...a),
+});
+
+let toolsRefreshing = null;
+/** The tools of the servers (name, calling convention). A known list is served at once and refreshed behind: no call waits for `mcporter list`. */
 async function getToolsList() {
   if (cachedTools && Date.now() - toolsLastFetched < 120_000) return cachedTools;
+  toolsRefreshing ??= refreshToolsList().finally(() => { toolsRefreshing = null; });
+  return cachedTools ?? toolsRefreshing;
+}
+
+async function refreshToolsList() {
   try {
     const { stdout } = await execFileAsync("mcporter", ["list", "--schema", "--json"], {
       timeout: 30_000, cwd: "/root/ImpulseMotion",
@@ -1960,19 +1977,34 @@ const server = http.createServer(async (req, res) => {
           resolve({ stdout });
         });
       });
+      // The open connection first; when it cannot be used (server unreachable, pool paused or
+      // switched off), the mcporter process as before. Same result either way:
+      // { result } for the tool's JSON, { text } for its own error text.
+      const dot = String(body.tool).indexOf(".");
+      const poolServer = String(body.tool).slice(0, dot), poolTool = String(body.tool).slice(dot + 1);
+      const once = async () => {
+        try {
+          const r = await mcpPool.call(poolServer, poolTool, toolInput, timeoutMs);
+          return r.ok ? { result: r.value } : { text: r.toolError };
+        } catch (err) {
+          if (err instanceof PoolTimeout) throw new Error(`tool timed out after ${timeoutMs}ms`);
+          if (process.env.MCP_POOL !== "0") console.log(`[mcp-pool] ${body.tool} : repli sur le processus mcporter — ${String(err?.message ?? err).slice(0, 160)}`);
+          const { stdout } = await call();
+          try { return { result: JSON.parse(stdout) }; } catch { return { text: stdout }; }
+        }
+      };
       try {
-        let stdout;
         let toolError = null;
         for (let attempt = 1; attempt <= 2; attempt++) {
-          ({ stdout } = await call());
-          try {
-            const result = JSON.parse(stdout);
+          const out = await once();
+          if ("result" in out) {
             res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ result }));
+            res.end(JSON.stringify({ result: out.result }));
             return;
-          } catch {
-            // mcporter prints JS-notation (not JSON) when the tool itself errors
-            toolError = stdout.slice(0, 500);
+          }
+          {
+            // The tool itself answered an error (JS-notation text, not JSON)
+            toolError = out.text.slice(0, 500);
             console.error(`[tool] ${body.tool} attempt ${attempt} failed: ${toolError.slice(0, 200)}${toolTarget(body.tool, toolInput)}`);
             // A refused access will not change on retry: answer at once.
             if (/does not have permission|Forbidden|PERMISSION_DENIED|USER_PERMISSION_DENIED/i.test(toolError)) break;
@@ -2553,7 +2585,7 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", capabilities: CAPABILITIES, jobsRunning: jobs.runningJobs().length, persistentSessions: sessionPool.snapshot() }));
+      res.end(JSON.stringify({ status: "ok", capabilities: CAPABILITIES, jobsRunning: jobs.runningJobs().length, persistentSessions: sessionPool.snapshot(), mcpPool: mcpPool.stats() }));
       return;
     }
 
