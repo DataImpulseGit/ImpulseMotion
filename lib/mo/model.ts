@@ -8,7 +8,7 @@
  * This module is client-safe (types + pure parsing); storage is in ./thread.
  */
 
-export type MoCardType = "kpis" | "table" | "chart" | "creatives" | "note" | "ask" | "file" | "action" | "frame";
+export type MoCardType = "kpis" | "table" | "chart" | "creatives" | "note" | "ask" | "file" | "action" | "frame" | "browser";
 export type MoTone = "good" | "bad" | "neutral";
 /** The consultant's verdict on a visual: kept (green) or cut (grey). */
 export type MoVerdict = "keep" | "cut";
@@ -97,7 +97,9 @@ export type MoCardPayload =
   /** Something to confirm: a publication prepared through the Pilotage. */
   | ({ type: "action" } & MoPublishAction)
   /** A client frame: a named zone of the board (lib/mo/frames.ts) the client's cards are laid in; never written by the model. */
-  | { type: "frame"; clientId: string; clientName: string; color: string };
+  | { type: "frame"; clientId: string; clientName: string; color: string }
+  /** The piloted browser (server/browser.mjs on the relay): a live view the consultant watches and can take over; laid by the application, never written by the model. */
+  | { type: "browser" };
 
 export type MoCard = MoCardBase & MoCardPayload;
 
@@ -195,6 +197,7 @@ export const CARD_SIZES: Record<MoCardType, { w: number; h: number }> = {
   file: { w: 300, h: 380 },
   action: { w: 560, h: 700 },
   frame: { w: 1168, h: 320 },
+  browser: { w: 1040, h: 740 },
 };
 
 /**
@@ -524,6 +527,7 @@ export function describeCards(cards: MoCard[]): string {
       case "file": return ` — fichier ${c.name}${c.assetId ? ` [asset ${c.assetId}]` : ""}${c.link ? " (dans le Drive)" : ""}`;
       case "action": return ` — publication ${c.status === "sent" ? "envoyée (PAUSED)" : c.status === "failed" ? "en échec" : "à confirmer par la personne"} : ${c.adset} [asset ${c.assetId}]`;
       case "frame": return " — cadre client";
+      case "browser": return " — navigateur piloté (outils browser) que la personne regarde en direct";
     }
   };
   const verdicts = (c: MoCard) => (c.type === "creatives" ? c.items.filter((it) => it.verdict).map((it) => `${it.name} ${it.verdict === "keep" ? "gardée" : "coupée"}`) : []);

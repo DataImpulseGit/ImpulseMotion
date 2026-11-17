@@ -126,3 +126,11 @@ export function toolPatternForServer(server: string): string {
  * request; the relay drops it for anyone else.
  */
 export const MO_SERVER = "mo" as const;
+
+/**
+ * Mo's piloted browser (server/browser.mjs, server/mcp-browser.mjs): a real
+ * Chromium on the relay's host the consultant watches in a « Navigateur » card
+ * and the AI drives (Ads Manager, Google Ads). Rides on the Mo context; asked
+ * only by the Mo chat route when MO_BROWSER=1 (lib/mo/turn.ts).
+ */
+export const BROWSER_SERVER = "browser" as const;

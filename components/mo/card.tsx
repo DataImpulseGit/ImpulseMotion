@@ -11,6 +11,8 @@
  */
 
 import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { Globe } from "lucide-react";
+import { MoBrowserBody } from "@/components/mo/browser-body";
 import { ArrowDownRight, ArrowUpRight, BarChart3, Check, ChevronDown, ChevronUp, ExternalLink, FileSpreadsheet, FileText, FileUp, Frame, HardDrive, Image as ImageIcon, LayoutGrid, Link2, Loader2, MessageCircleQuestion, Minus, Rocket, RotateCcw, Send, StickyNote, Table2, TrendingUp, X } from "lucide-react";
 import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { AiMarkdown } from "@/components/ai/ai-markdown";
@@ -22,7 +24,7 @@ import { CardActions, VerdictBadge, actionForKey, actionsFor, type CreativeActio
 
 const SERIES_COLORS = ["var(--ui-accent-ink)", "#f0abfc", "#67e8f9", "#fde68a", "#86efac", "#fca5a5"];
 
-const ICONS = { kpis: LayoutGrid, table: Table2, chart: TrendingUp, creatives: ImageIcon, note: StickyNote, ask: MessageCircleQuestion, file: FileUp, action: Send, frame: Frame } as const;
+const ICONS = { kpis: LayoutGrid, table: Table2, chart: TrendingUp, creatives: ImageIcon, note: StickyNote, ask: MessageCircleQuestion, file: FileUp, action: Send, frame: Frame, browser: Globe } as const;
 
 /** What the page is doing on this card right now (a spinner on the button): `item:<index>:<action>`, `confirm` or `sheet`. */
 export type CardBusy = string | null;
@@ -268,6 +270,7 @@ function CardBody({ card, width, selected, busy, onAnswer, onItemAction, onItemH
     case "action": return <PublishBody card={card} busy={busy === "confirm"} onConfirm={onConfirmPublish} />;
     // Frames are drawn by MoFrameView (components/mo/frame.tsx), never as a card body.
     case "frame": return null;
+    case "browser": return <MoBrowserBody selected={selected} />;
   }
 }
 

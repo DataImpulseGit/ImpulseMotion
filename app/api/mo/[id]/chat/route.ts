@@ -15,7 +15,7 @@ import { requireStaff } from "@/lib/auth-helpers";
 import type { RelayChatBody, RelayEffort, RelayMessage, RelayModel } from "@/lib/relay-chat";
 import { runningJobCount, runningJobOf, startAiJob } from "@/lib/ai-jobs";
 import { describeCards } from "@/lib/mo/model";
-import { appendMoUserMessage, loadBoard, parseMoCards, parseMoMessages } from "@/lib/mo/thread";
+import { appendMoUserMessage, loadBoard, parseMoCards, parseMoMessages, postMoCards } from "@/lib/mo/thread";
 import { moBeltFor, moRelayBase, moTurnContext } from "@/lib/mo/turn";
 import { recordMoTurn } from "@/lib/mo/turns";
 
@@ -61,7 +61,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const effort: RelayEffort | undefined = EFFORTS.has(body.effort as RelayEffort) ? (body.effort as RelayEffort) : undefined;
   const account = typeof body.account === "string" && ACCOUNT_RE.test(body.account) && body.account !== "auto" ? body.account : undefined;
 
-  const belt = moBeltFor(message, !!ctx.dataScope);
+  const hasBrowserCard = cards.some((c) => c.type === "browser");
+  const belt = moBeltFor(message, !!ctx.dataScope, { browserCard: hasBrowserCard });
+  // The piloted browser is asked for: its card is on the board before the model's first step, so the person watches from the start.
+  if (belt.name === "browser" && !hasBrowserCard) await postMoCards(board.id, [{ type: "browser", title: "Navigateur", subtitle: "Piloté par Mo · vous pouvez reprendre la main" }], at);
   const relayBody: RelayChatBody = { ...moRelayBase(ctx, guard.session, board.id, belt, { ...(model ? { model } : {}), ...(effort ? { effort } : {}), account }), messages: relayMessages };
 
   await appendMoUserMessage(board.id, message, at);

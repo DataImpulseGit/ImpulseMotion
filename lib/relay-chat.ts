@@ -79,7 +79,7 @@ export interface RelayChatBody {
    * MCP server runs the application's tools (lib/mo/tools.ts) as that person;
    * the server is dropped without this.
    */
-  mo?: { userId: string; boardId: string };
+  mo?: { userId: string; boardId: string; /** Shown to a colleague who finds the piloted browser busy. */ name?: string };
 }
 
 export type RelayModel = "sonnet" | "opus" | "fable";

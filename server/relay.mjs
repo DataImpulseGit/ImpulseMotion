@@ -23,6 +23,7 @@ import * as maxAccounts from "./max-accounts.mjs";
 import { createMcpPool, PoolTimeout } from "./mcp-pool.mjs";
 import * as voice from "./voice.mjs";
 import * as adlib from "./adlib.mjs";
+import * as pilotBrowser from "./browser.mjs";
 import * as gwsAuth from "./gws-auth.mjs";
 import { handleSheetsRequest } from "./sheets-direct.mjs";
 import { buildSystemPrompt, buildTurnPrompt, cliTokenEnv, createTurnMeter, promptLogExcerpt } from "./relay-prompt.mjs";
@@ -216,6 +217,10 @@ const PHOTOCRAFT_MCP_SCRIPT = "/root/ImpulseMotion/server/mcp-photocraft.mjs";
 // run as the consultant speaking to Mo — the app names them in the request, the model never does.
 const MO_SERVER = "mo";
 const MO_MCP_SCRIPT = "/root/ImpulseMotion/server/mcp-mo.mjs";
+// Mo's piloted browser (server/browser.mjs, server/mcp-browser.mjs): a Chromium on this host the consultant
+// watches in a card of their board; the AI drives it for the consultant the app pinned (same context as "mo").
+const BROWSER_SERVER = "browser";
+const BROWSER_MCP_SCRIPT = "/root/ImpulseMotion/server/mcp-browser.mjs";
 const PHOTOCRAFT_CLI = process.env.PHOTOCRAFT_CLI || "/usr/local/bin/photocraft-cli";
 function photocraftConfigured() { return fs.existsSync(PHOTOCRAFT_CLI); }
 const WORKSPACES_DIR = path.join(RELAY_CLAUDE_CWD, "workspaces");
@@ -425,7 +430,7 @@ const CLIENT_KEY_RE = /^[a-z0-9][a-z0-9_-]{1,39}$/;
 // fields, announced by /health. The application reads it before relying on a
 // field an older relay would silently ignore (lib/dashboard-copilot.ts), so
 // the relay and the application can be deployed in any order.
-const CAPABILITIES = ["turnContext", "hqGuidance", "sheetsDirect", "toolAllowlist", "jobs", "figcraft", "photocraft", "voice", "adlib", "chatWarm"];
+const CAPABILITIES = ["turnContext", "hqGuidance", "sheetsDirect", "toolAllowlist", "jobs", "figcraft", "photocraft", "voice", "adlib", "chatWarm", ...(pilotBrowser.browserConfigured() ? ["browser"] : [])];
 // Detached turns (jobs) hold no HTTP response open: they may run longer than
 // a streamed one, up to this cap.
 const DETACHED_MAX_BUDGET_MS = Number(process.env.RELAY_DETACHED_MAX_BUDGET_MS || 15 * 60 * 1000);
@@ -433,7 +438,7 @@ const DETACHED_MAX_BUDGET_MS = Number(process.env.RELAY_DETACHED_MAX_BUDGET_MS |
 // the shared secret). Unset: the app finds out by reading the job itself.
 const RELAY_APP_URL = process.env.RELAY_APP_URL || "";
 // Agentic loop cap. 15 by default; staff surfaces with the sandbox ask for more.
-const MAX_TURNS_CAP = 40;
+const MAX_TURNS_CAP = 80; // a piloted-browser turn (lib/mo/turn.ts) is many small steps
 // Pseudo-server "web": not an MCP server but the CLI's built-in WebSearch /
 // WebFetch. Staff only (never a client bot: a fetched page is an injection
 // vector). WebSearch is an Anthropic server-side tool, absent on Bedrock.
@@ -551,6 +556,7 @@ const ALLOWED_MCP_SERVERS = new Set([
   FIGCRAFT_SERVER,
   PHOTOCRAFT_SERVER,
   MO_SERVER,
+  BROWSER_SERVER,
 ]);
 
 // Per-server explicit tool allowlist for the CHAT (handleChat). Servers absent
@@ -837,6 +843,17 @@ function buildScopedMcpConfig({ servers, clientKey, clientKeys = null, accountSc
       kept.push(name);
       continue;
     }
+    if (name === BROWSER_SERVER) {
+      // The piloted browser of the consultant the app named — needs the Mo context and the feature switched on.
+      if (!mo || !pilotBrowser.browserConfigured()) continue;
+      mcpServers[name] = {
+        command: "node",
+        args: [BROWSER_MCP_SCRIPT],
+        env: { BROWSER_ACT_URL: `http://127.0.0.1:${PORT}/api/browser/act`, BROWSER_TOKEN: RELAY_SHARED_SECRET, BROWSER_USER: mo.userId, BROWSER_NAME: mo.name || "" },
+      };
+      kept.push(name);
+      continue;
+    }
     if (name === PHOTOCRAFT_SERVER) {
       // Headless PhotoCraft on the conversation's workspace (uploads/ read, out/ written).
       if (!photocraft || !workspaceDir) continue;
@@ -922,6 +939,7 @@ function buildScopedMcpConfig({ servers, clientKey, clientKeys = null, accountSc
     if (e.args?.[0] === SCOPED_ADS_MCP_SCRIPT) return `${n}[${e.env.SCOPED_ACCOUNTS}]`;
     if (n === CLIENT_DATA_SERVER) return `${n}[${e.env.CLIENT_KEYS}]`;
     if (n === MO_SERVER) return `${n}[${e.env.MO_USER.slice(-6)}]`;
+    if (n === BROWSER_SERVER) return `${n}[${e.env.BROWSER_USER.slice(-6)}]`;
     return `${n}[non restreint]`;
   });
   console.log(`[chat] MCP: ${summary.join(" ") || "(aucun serveur)"}`);
@@ -1276,7 +1294,12 @@ async function runChat(messages, allowedServers, accountScope, res, systemPrompt
     if (clientBot || !m || !idOk(m.userId) || !idOk(m.boardId) || !/^https?:\/\//.test(appUrl) || RELAY_SHARED_SECRET.length < 16) {
       servers = servers.filter((s) => s !== MO_SERVER);
       console.error(`[chat] mo retiré — ${clientBot ? "requête de bot client" : !m ? "contexte mo absent" : !appUrl ? "RELAY_APP_URL absent" : "contexte mo invalide"}`);
-    } else moCtx = { userId: m.userId, boardId: m.boardId, appUrl };
+    } else moCtx = { userId: m.userId, boardId: m.boardId, appUrl, name: typeof m.name === "string" ? m.name.slice(0, 60) : "" };
+  }
+  // The piloted browser rides on the Mo context (staff, consultant pinned by the app): never without it.
+  if (servers.includes(BROWSER_SERVER) && (!moCtx || !pilotBrowser.browserConfigured())) {
+    servers = servers.filter((s) => s !== BROWSER_SERVER);
+    console.error(`[chat] browser retiré — ${!moCtx ? "contexte mo absent" : "navigateur piloté non activé (MO_BROWSER=1)"}`);
   }
   const scopedMcp = buildScopedMcpConfig({ servers, clientKey, clientKeys, accountScope, ga4PropertyId, hqToken, n8nToken, workspaceDir, gwsAuthState, clientBot, dataTools, figcraftLink, photocraft: photocraftOn, mo: moCtx });
   if (scopedMcp) servers = scopedMcp.servers;
@@ -2570,6 +2593,51 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // ── Navigateur piloté de Mo (server/browser.mjs) ──
+    // /api/browser/* : l'app et le serveur d'outils "browser" (secret du relay).
+    // /browser/*     : la page que la carte encadre — elle présente un jeton de vue court, jamais le secret.
+    if (url.pathname.startsWith("/api/browser/")) {
+      const send = (status, obj) => { res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" }); res.end(JSON.stringify(obj)); };
+      if (!authorized(req)) return send(401, { error: "unauthorized" });
+      if (url.pathname === "/api/browser/status" && req.method === "GET") return send(200, pilotBrowser.status());
+      if (req.method !== "POST") return send(404, { error: "Not found" });
+      try {
+        const body = await readBody(req, 256 * 1024);
+        if (url.pathname === "/api/browser/session") {
+          const started = await pilotBrowser.ensure(body.userId, { name: body.name });
+          return send(200, { ok: true, ...started, ...pilotBrowser.mintViewToken(RELAY_SHARED_SECRET, body.userId), view: "/browser/view" });
+        }
+        if (url.pathname === "/api/browser/act") return send(200, { ok: true, result: await pilotBrowser.act(body.userId, body.action, body.args && typeof body.args === "object" ? body.args : {}) });
+        if (url.pathname === "/api/browser/close") return send(200, await pilotBrowser.close(body.userId));
+        return send(404, { error: "Not found" });
+      } catch (e) {
+        if (!(e instanceof pilotBrowser.BrowserError)) console.error("[browser]", e instanceof Error ? e.message : e);
+        return send(e?.status >= 400 && e?.status < 600 ? e.status : 500, { error: e instanceof Error ? e.message : "navigateur en erreur" });
+      }
+    }
+    if (url.pathname.startsWith("/browser/")) {
+      const send = (status, obj) => { res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" }); res.end(JSON.stringify(obj)); };
+      if (url.pathname === "/browser/view" && req.method === "GET") {
+        res.writeHead(200, {
+          "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer",
+          // Framed by the application only; talks to its own origin only.
+          "Content-Security-Policy": `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; frame-ancestors ${process.env.BROWSER_FRAME_ANCESTORS || "https://impulsemotion.ai https://www.impulsemotion.ai https://impulsemotion.vercel.app"}`,
+        });
+        res.end(pilotBrowser.VIEW_HTML);
+        return;
+      }
+      const userId = pilotBrowser.readViewToken(ACCEPTED_SECRETS.map(String), (req.headers.authorization || "").replace(/^View\s+/i, ""));
+      if (!userId) return send(401, { error: "Session du navigateur expirée : rouvrez la carte depuis Mo." });
+      try {
+        if (url.pathname === "/browser/stream" && req.method === "GET") { pilotBrowser.subscribe(userId, res); return; }
+        if (url.pathname === "/browser/input" && req.method === "POST") return send(200, await pilotBrowser.input(userId, await readBody(req, 256 * 1024)));
+        return send(404, { error: "Not found" });
+      } catch (e) {
+        if (!(e instanceof pilotBrowser.BrowserError)) console.error("[browser]", e instanceof Error ? e.message : e);
+        return send(e?.status >= 400 && e?.status < 600 ? e.status : 500, { error: e instanceof Error ? e.message : "navigateur en erreur" });
+      }
+    }
+
     if (url.pathname === "/api/quota" && req.method === "GET") {
       if (!authorized(req)) {
         res.writeHead(401, { "Content-Type": "application/json" });
@@ -2585,7 +2653,7 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", capabilities: CAPABILITIES, jobsRunning: jobs.runningJobs().length, persistentSessions: sessionPool.snapshot(), mcpPool: mcpPool.stats() }));
+      res.end(JSON.stringify({ status: "ok", capabilities: CAPABILITIES, jobsRunning: jobs.runningJobs().length, persistentSessions: sessionPool.snapshot(), mcpPool: mcpPool.stats(), browser: pilotBrowser.status() }));
       return;
     }
 
