@@ -2621,21 +2621,13 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, {
           "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer",
           // Framed by the application only; talks to its own origin only.
-          "Content-Security-Policy": `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; frame-ancestors ${process.env.BROWSER_FRAME_ANCESTORS || "https://impulsemotion.ai https://www.impulsemotion.ai https://impulsemotion.vercel.app"}`,
+          "Content-Security-Policy": `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'self' wss://${String(req.headers.host || "").replace(/[^A-Za-z0-9.:-]/g, "")}; frame-ancestors ${process.env.BROWSER_FRAME_ANCESTORS || "https://impulsemotion.ai https://www.impulsemotion.ai https://impulsemotion.vercel.app"}`,
         });
         res.end(pilotBrowser.VIEW_HTML);
         return;
       }
-      const userId = pilotBrowser.readViewToken(ACCEPTED_SECRETS.map(String), (req.headers.authorization || "").replace(/^View\s+/i, ""));
-      if (!userId) return send(401, { error: "Session du navigateur expirée : rouvrez la carte depuis Mo." });
-      try {
-        if (url.pathname === "/browser/stream" && req.method === "GET") { pilotBrowser.subscribe(userId, res); return; }
-        if (url.pathname === "/browser/input" && req.method === "POST") return send(200, await pilotBrowser.input(userId, await readBody(req, 256 * 1024)));
-        return send(404, { error: "Not found" });
-      } catch (e) {
-        if (!(e instanceof pilotBrowser.BrowserError)) console.error("[browser]", e instanceof Error ? e.message : e);
-        return send(e?.status >= 400 && e?.status < 600 ? e.status : 500, { error: e instanceof Error ? e.message : "navigateur en erreur" });
-      }
+      // The screen and the consultant's mouse / keyboard travel on the live link (/browser/ws, the "upgrade" handler below).
+      return send(404, { error: "Not found" });
     }
 
     if (url.pathname === "/api/quota" && req.method === "GET") {
@@ -2664,6 +2656,14 @@ const server = http.createServer(async (req, res) => {
     if (!res.headersSent) res.writeHead(err?.status === 413 ? 413 : 500, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: err.message }));
   }
+});
+
+// The piloted browser's live link (server/browser.mjs): the only WebSocket of the relay.
+server.on("upgrade", (req, socket, head) => {
+  let pathname = "";
+  try { pathname = new URL(req.url, `http://localhost:${PORT}`).pathname; } catch { /* malformed */ }
+  if (pathname !== "/browser/ws") { socket.destroy(); return; }
+  try { pilotBrowser.handleUpgrade(req, socket, head, ACCEPTED_SECRETS.map(String)); } catch (e) { console.error("[browser]", e instanceof Error ? e.message : e); socket.destroy(); }
 });
 
 // A promise rejected without a handler, somewhere in a tool or a stream, must not take down every session:

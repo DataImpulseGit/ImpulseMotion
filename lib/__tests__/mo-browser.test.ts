@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { asksForBrowser, moBeltFor, MO_BROWSER_MAX_TURNS, moRelayBase, type MoTurnContext } from "@/lib/mo/turn";
-import { mintViewToken, normalizeAddress, PUBLISH_RE, readViewToken, siteAllowed } from "../../server/browser.mjs";
+import { mintViewToken, normalizeAddress, parseCookieExport, PUBLISH_RE, readViewToken, siteAllowed } from "../../server/browser.mjs";
 
 const ctx = { clients: [], systemPrompt: "RÈGLES", accountScope: { meta: [], google: [], tiktok: [], unrestricted: false }, dataScope: null } as unknown as MoTurnContext;
 const session = { userId: "user_abcdef", role: "consultant", user: { name: "Camille", email: null } };
@@ -65,5 +65,29 @@ describe("Mo — navigateur piloté : garde-fous du relay", () => {
   it("refuse à l'IA les boutons qui publient ou paient, pas ceux qui avancent", () => {
     for (const label of ["Publier", "Publish", "Publier les modifications", "Publish changes", "Passer la commande", "Submit for review", "Activer"]) expect(PUBLISH_RE.test(label)).toBe(true);
     for (const label of ["Suivant", "Créer", "Continuer", "Enregistrer le brouillon", "Publicités", "Fermer"]) expect(PUBLISH_RE.test(label)).toBe(false);
+  });
+
+  it("cookies importés : seulement ceux des plateformes, non expirés, au format de Chrome", () => {
+    const now = 1_800_000_000_000;
+    const json = JSON.stringify([
+      { domain: ".facebook.com", name: "c_user", value: "123", path: "/", secure: true, httpOnly: false, sameSite: "no_restriction", expirationDate: now / 1000 + 3600 },
+      { domain: "ads.google.com", hostOnly: true, name: "SID", value: "abc", sameSite: "lax", session: true },
+      { domain: ".exemple.fr", name: "autre", value: "x" },
+      { domain: ".tiktok.com", name: "vieux", value: "x", expirationDate: 1000 },
+      { domain: ".facebook.com.evil.io", name: "piege", value: "x" },
+    ]);
+    const r = parseCookieExport(json, now);
+    expect(r.cookies.map((c: { name: string }) => c.name)).toEqual(["c_user", "SID"]);
+    expect(r.cookies[0]).toMatchObject({ domain: ".facebook.com", secure: true, sameSite: "None", path: "/" });
+    expect(r.cookies[1]).toMatchObject({ domain: "ads.google.com", sameSite: "Lax" });
+    expect(r.cookies[1].expires).toBeUndefined();
+    expect(r.skipped).toBe(3);
+    expect(r.sites).toEqual({ "facebook.com": 1, "google.com": 1 });
+    // Netscape cookies.txt
+    const txt = "# Netscape HTTP Cookie File\n.facebook.com\tTRUE\t/\tTRUE\t1900000000\txs\tsecret\n#HttpOnly_.facebook.com\tTRUE\t/\tTRUE\t1900000000\tdatr\tsecret2\n";
+    const n = parseCookieExport(txt, now);
+    expect(n.cookies.map((c: { name: string; httpOnly: boolean }) => [c.name, c.httpOnly])).toEqual([["xs", false], ["datr", true]]);
+    expect(() => parseCookieExport("n'importe quoi", now)).toThrow();
+    expect(() => parseCookieExport("", now)).toThrow();
   });
 });

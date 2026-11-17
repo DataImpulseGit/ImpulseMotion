@@ -35,7 +35,7 @@ const BROWSER_GUIDE = `
 
 NAVIGATEUR PILOTÉ (outils browser) — la personne regarde en direct, dans la carte « Navigateur » de son tableau, le vrai Chrome que tu pilotes.
 - Commence par open (avec l'adresse : adsmanager.facebook.com, business.facebook.com, ads.google.com, ads.tiktok.com). Chaque action te rend le relevé de la page : la liste numérotée des éléments visibles. Clique et tape par index du DERNIER relevé ; screenshot seulement si le relevé ne suffit pas.
-- Si la page demande une connexion, un mot de passe ou un code : arrête-toi et dis à la personne de se connecter elle-même dans la carte, puis de te dire « c'est bon ». Tu ne tapes jamais d'identifiant ni de mot de passe.
+- Si la page demande une connexion, un mot de passe ou un code : arrête-toi et dis à la personne de se connecter elle-même dans la carte, ou d'utiliser le bouton « Mes cookies » de la carte pour reprendre la session de son propre Chrome, puis de te dire « c'est bon ». Tu ne tapes jamais d'identifiant ni de mot de passe.
 - Tu prépares, la personne publie : va jusqu'à l'écran de vérification, puis dis ce qui est prêt et demande-lui de cliquer elle-même sur « Publier ». Ce clic t'est refusé. Toute campagne se crée désactivée / en brouillon quand la plateforme le permet.
 - Vérifie le compte publicitaire affiché avant de créer quoi que ce soit (nom du client attendu) ; en cas de doute, demande.
 - Si un outil répond que la personne a repris la main : dis-le en une phrase et arrête ce tour.
