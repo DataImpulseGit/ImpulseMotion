@@ -35,6 +35,19 @@ export function MoBrowserBody({ selected }: { selected: boolean }) {
     void openSession().then((next) => { if (alive) setState(next); });
     return () => { alive = false; };
   }, [attempt]);
+  // While a pointer is held down on the board (the card is being moved or resized), the frame lets the mouse
+  // through: the gesture is not swallowed by the frame, and nothing gets selected. Presses inside the frame
+  // never reach this window, so using the browser is not affected.
+  const [gesture, setGesture] = useState(false);
+  useEffect(() => {
+    const down = () => setGesture(true);
+    const up = () => setGesture(false);
+    window.addEventListener("pointerdown", down, true);
+    window.addEventListener("pointerup", up, true);
+    window.addEventListener("pointercancel", up, true);
+    window.addEventListener("blur", up);
+    return () => { window.removeEventListener("pointerdown", down, true); window.removeEventListener("pointerup", up, true); window.removeEventListener("pointercancel", up, true); window.removeEventListener("blur", up); };
+  }, []);
   // The view token lasts 30 minutes: the frame is renewed a little before.
   useEffect(() => {
     if (state.phase !== "ready") return;
@@ -50,8 +63,8 @@ export function MoBrowserBody({ selected }: { selected: boolean }) {
     </div>
   );
   return (
-    <div className="relative h-full min-h-[240px] rounded-lg overflow-hidden border border-ui-line bg-black">
-      <iframe src={state.src} title="Navigateur piloté" className="absolute inset-0 w-full h-full border-0" style={{ pointerEvents: selected ? "auto" : "none" }} referrerPolicy="no-referrer" allow="clipboard-read; clipboard-write" />
+    <div className="relative h-full min-h-[240px] rounded-lg overflow-hidden border border-ui-line bg-black select-none" onDragStart={(e) => e.preventDefault()}>
+      <iframe src={state.src} title="Navigateur piloté" className="absolute inset-0 w-full h-full border-0" style={{ pointerEvents: selected && !gesture ? "auto" : "none", userSelect: "none" }} referrerPolicy="no-referrer" allow="clipboard-read; clipboard-write" />
       {!selected && <div className="absolute inset-x-0 bottom-0 px-3 py-1.5 text-[11px] text-white/80 bg-black/60">Cliquez la carte pour utiliser le navigateur</div>}
     </div>
   );

@@ -564,10 +564,11 @@ export async function act(userId, action, args = {}) {
 export const VIEW_HTML = `<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Navigateur Mo</title>
 <style>
-*{box-sizing:border-box}html,body{margin:0;height:100%;background:#0b0b10;color:#e8e6f0;font:13px/1.4 system-ui,sans-serif;overflow:hidden}
+*{box-sizing:border-box}html,body{margin:0;height:100%;-webkit-user-select:none;user-select:none;background:#0b0b10;color:#e8e6f0;font:13px/1.4 system-ui,sans-serif;overflow:hidden}
 #bar{display:flex;gap:6px;align-items:center;padding:6px 8px;background:#15141d;border-bottom:1px solid #2a2836;height:40px}
 button{background:#22202e;color:#e8e6f0;border:1px solid #34314a;border-radius:8px;padding:5px 9px;cursor:pointer;font:inherit;white-space:nowrap}
 button:hover{background:#2c2940}button.on{background:#7043F5;border-color:#7043F5;color:#fff}
+#addr,#ckt{-webkit-user-select:text;user-select:text}
 #addr{flex:1;min-width:60px;background:#0b0b10;color:#e8e6f0;border:1px solid #34314a;border-radius:8px;padding:6px 9px;font:inherit}
 #wrap{position:absolute;top:40px;left:0;right:0;bottom:22px;background:#000;overflow:hidden}
 #screen{position:absolute;left:0;top:0;width:100%;height:100%;display:block;cursor:default}

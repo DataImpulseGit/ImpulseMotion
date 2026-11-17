@@ -155,7 +155,8 @@ export const MoCardView = memo(function MoCardView({ card, fresh, delayMs = 0, s
       </div>
       {!card.minimized && (
         <>
-          <div className="flex-1 min-h-0 overflow-auto px-3.5 py-3 mo-scroll select-text touch-auto cursor-auto">
+          {/* A browser card holds a frame, not text: nothing in it is selectable (a drag would paint the whole frame blue). */}
+          <div className={`flex-1 min-h-0 mo-scroll touch-auto cursor-auto ${card.type === "browser" ? "overflow-hidden p-1.5 select-none" : "overflow-auto px-3.5 py-3 select-text"}`}>
             <CardBody card={card} width={width} selected={selected} busy={busy} onAnswer={onAnswer ? (opt) => onAnswer(card.id, opt) : undefined}
               onItemAction={onItemAction ? (i, a) => onItemAction(card.id, i, a) : undefined} onItemHover={onItemHover ? (i) => onItemHover(card.id, i) : undefined}
               onConfirmPublish={onConfirmPublish ? (edits) => onConfirmPublish(card.id, edits) : undefined} />
