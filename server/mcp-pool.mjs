@@ -231,6 +231,7 @@ export function createMcpPool({ configPath, rootDir, enabled = true, log = () =>
   }
 
   function stats() {
+    /** @type {Record<string, { connected: boolean, calls: number, reconnects: number, fallbacks: number, pausedUntil?: string, lastError?: string }>} */
     const servers = {};
     for (const [name, s] of state) servers[name] = { connected: !!s.connectedAt, calls: s.calls, reconnects: s.reconnects, fallbacks: s.fallbacks, ...(s.breakerUntil > Date.now() ? { pausedUntil: new Date(s.breakerUntil).toISOString() } : {}), ...(s.lastError ? { lastError: s.lastError } : {}) };
     return { enabled: !disabledReason, ...(disabledReason ? { reason: disabledReason } : {}), servers };

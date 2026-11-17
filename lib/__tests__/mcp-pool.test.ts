@@ -5,7 +5,6 @@
  * back (PoolUnavailable → the relay spawns mcporter as before).
  */
 import { describe, expect, it, vi } from "vitest";
-// @ts-expect-error — plain .mjs module of the relay
 import { createMcpPool, PoolTimeout, PoolUnavailable } from "../../server/mcp-pool.mjs";
 
 type Handler = (tool: string, args: unknown) => Promise<unknown>;
