@@ -13,6 +13,8 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Globe } from "lucide-react";
 import { MoBrowserBody } from "@/components/mo/browser-body";
+import { SheetTable } from "@/components/mo/sheet-table";
+import type { SheetEdit } from "@/lib/mo/sheet";
 import { ArrowDownRight, ArrowUpRight, BarChart3, Check, ChevronDown, ChevronUp, ExternalLink, FileSpreadsheet, FileText, FileUp, Frame, HardDrive, Image as ImageIcon, LayoutGrid, Link2, Loader2, MessageCircleQuestion, Minus, Rocket, RotateCcw, Send, StickyNote, Table2, TrendingUp, X } from "lucide-react";
 import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { AiMarkdown } from "@/components/ai/ai-markdown";
@@ -61,6 +63,8 @@ export interface MoCardViewProps {
   onItemHover?: (id: string, index: number | null) => void;
   /** « Confirmer » on a publication card, with the texts as edited. */
   onConfirmPublish?: (id: string, edits: PublishEdits) => void;
+  /** A table card worked like a spreadsheet: a sort, a filter, a colour, a cell edit (lib/mo/sheet.ts). */
+  onTableEdit?: (id: string, edit: SheetEdit) => void;
   /** « Google Sheet » in the header of a table / KPI / creatives card (or S on the selected card). */
   onCardAction?: (id: string, action: WholeCardAction) => void;
   busy?: CardBusy;
@@ -90,7 +94,7 @@ export function Handle({ dir, cls, cursor, cardId, getK, onStart, onResize, onEn
   return <div data-handle={dir} data-card-id={cardId} className={`absolute z-10 ${cls} ${cursor} touch-none`} {...drag} />;
 }
 
-export const MoCardView = memo(function MoCardView({ card, fresh, delayMs = 0, selected, refTitle, getK, onMove, onMoveEnd, onResizeStart, onResize, onResizeEnd, onFront, onSelect, onToggle, onClose, onFocusRef, onHoverRef, onAnswer, onItemAction, onItemHover, onConfirmPublish, onCardAction, busy = null }: MoCardViewProps) {
+export const MoCardView = memo(function MoCardView({ card, fresh, delayMs = 0, selected, refTitle, getK, onMove, onMoveEnd, onResizeStart, onResize, onResizeEnd, onFront, onSelect, onToggle, onClose, onFocusRef, onHoverRef, onAnswer, onItemAction, onItemHover, onConfirmPublish, onTableEdit, onCardAction, busy = null }: MoCardViewProps) {
   const el = useRef<HTMLDivElement>(null);
   const Icon = ICONS[card.type] ?? BarChart3;
   const h = card.minimized ? MIN_HEADER_H : card.h ?? CARD_SIZES[card.type].h;
@@ -156,10 +160,11 @@ export const MoCardView = memo(function MoCardView({ card, fresh, delayMs = 0, s
       {!card.minimized && (
         <>
           {/* A browser card holds a frame, not text: nothing in it is selectable (a drag would paint the whole frame blue). */}
-          <div className={`flex-1 min-h-0 mo-scroll touch-auto cursor-auto ${card.type === "browser" ? "overflow-hidden p-1.5 select-none" : "overflow-auto px-3.5 py-3 select-text"}`}>
+          <div className={`flex-1 min-h-0 mo-scroll touch-auto cursor-auto ${card.type === "browser" ? "overflow-hidden p-1.5 select-none" : card.type === "table" ? "overflow-hidden p-2" : "overflow-auto px-3.5 py-3 select-text"}`}>
             <CardBody card={card} width={width} selected={selected} busy={busy} onAnswer={onAnswer ? (opt) => onAnswer(card.id, opt) : undefined}
               onItemAction={onItemAction ? (i, a) => onItemAction(card.id, i, a) : undefined} onItemHover={onItemHover ? (i) => onItemHover(card.id, i) : undefined}
-              onConfirmPublish={onConfirmPublish ? (edits) => onConfirmPublish(card.id, edits) : undefined} />
+              onConfirmPublish={onConfirmPublish ? (edits) => onConfirmPublish(card.id, edits) : undefined}
+              onTableEdit={onTableEdit ? (edit) => onTableEdit(card.id, edit) : undefined} />
           </div>
           <div className="flex items-center gap-2 px-3.5 py-1.5 border-t border-ui-line text-[10px] text-ui-muted select-none">
             <span className="truncate" title={card.subtitle ?? ""}>{card.subtitle || "Source non précisée"}</span>
@@ -259,11 +264,11 @@ function relativeTime(iso: string): string {
   return new Date(t).toLocaleDateString("fr-FR", { day: "numeric", month: "short" });
 }
 
-function CardBody({ card, width, selected, busy, onAnswer, onItemAction, onItemHover, onConfirmPublish }: { card: MoCard; width: number; selected: boolean; busy: CardBusy; onAnswer?: (option: string) => void; onItemAction?: (index: number, action: CreativeAction) => void; onItemHover?: (index: number | null) => void; onConfirmPublish?: (edits: PublishEdits) => void }) {
+function CardBody({ card, width, selected, busy, onAnswer, onItemAction, onItemHover, onConfirmPublish, onTableEdit }: { card: MoCard; width: number; selected: boolean; busy: CardBusy; onAnswer?: (option: string) => void; onItemAction?: (index: number, action: CreativeAction) => void; onItemHover?: (index: number | null) => void; onConfirmPublish?: (edits: PublishEdits) => void; onTableEdit?: (edit: SheetEdit) => void }) {
   switch (card.type) {
     case "ask": return <Ask question={card.question} options={card.options} onAnswer={onAnswer} />;
     case "kpis": return <Kpis items={card.items} width={width} />;
-    case "table": return <Table columns={card.columns} rows={card.rows} align={card.align} />;
+    case "table": return <SheetTable card={card} active={selected} onEdit={onTableEdit} />;
     case "chart": return <Chart kind={card.kind} series={card.series} unit={card.unit} labels={card.x} width={width} />;
     case "creatives": return <Creatives items={card.items} width={width} selected={selected} busy={busy} onAction={onItemAction} onHover={onItemHover} />;
     case "note": return <AiMarkdown content={card.markdown} filesBase={null} className="prose-xs" />;
@@ -390,28 +395,6 @@ function Kpis({ items, width }: { items: Extract<MoCard, { type: "kpis" }>["item
   );
 }
 
-const NUMERIC = /^[\s\d.,%€$+\-−–—kKM]+(\s?(€|%|\$|k|M))?$/;
-
-function Table({ columns, rows, align }: { columns: string[]; rows: string[][]; align?: Array<"left" | "right"> }) {
-  // Numeric columns right-aligned even when the model forgot the alignment.
-  const right = useMemo(() => columns.map((_, j) => align?.[j] === "right" || (j > 0 && rows.length > 0 && rows.every((r) => !r[j] || NUMERIC.test(r[j])))), [columns, rows, align]);
-  const stickyFirst = columns.length > 4;
-  return (
-    <table className="w-full text-[12px] border-collapse">
-      <thead>
-        <tr>{columns.map((c, i) => <th key={i} className={`sticky top-0 z-[1] bg-ui-bg text-[10px] text-ui-fg2 font-medium px-2 py-1.5 border-b border-ui-line whitespace-nowrap ${right[i] ? "text-right" : "text-left"} ${stickyFirst && i === 0 ? "left-0 z-[2]" : ""}`}>{c}</th>)}</tr>
-      </thead>
-      <tbody>
-        {rows.map((r, i) => (
-          <tr key={i} className={`hover:bg-ui-raised ${i % 2 ? "bg-ui-raised" : ""}`}>
-            {r.map((cell, j) => <td key={j} className={`px-2 py-1.5 border-b border-ui-line ${right[j] ? "text-right tabular-nums whitespace-nowrap" : "text-left"} ${j === 0 ? "font-medium text-ui-fg" : "text-ui-fg2"} ${stickyFirst && j === 0 ? `sticky left-0 ${i % 2 ? "bg-ui-bg" : "bg-ui-bg"}` : ""}`}>{cell}</td>)}
-          </tr>
-        ))}
-        {!rows.length && <tr><td colSpan={columns.length} className="px-2 py-3 text-ui-muted text-center">Aucune ligne</td></tr>}
-      </tbody>
-    </table>
-  );
-}
 
 function Chart({ kind, series, unit, labels, width }: { kind: "line" | "bar"; series: Extract<MoCard, { type: "chart" }>["series"]; unit?: string; labels: string[]; width: number }) {
   const data = useMemo(() => labels.map((l, i) => { const row: Record<string, string | number | null> = { x: l }; for (const s of series) row[s.name] = s.values[i] ?? null; return row; }), [labels, series]);

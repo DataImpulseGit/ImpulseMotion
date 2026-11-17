@@ -10,7 +10,7 @@ import { prisma } from "@/lib/prisma";
 import { RELAY_URLS } from "@/lib/relay-server";
 import { relayHeaders } from "@/lib/relay-headers";
 import type { SheetCell } from "@/lib/sheet-values";
-import { toXlsx, XLSX_MIME } from "@/lib/xlsx";
+import { toXlsx, XLSX_MIME, type XlsxStyles } from "@/lib/xlsx";
 
 export interface DriveFolderRef { id: string; name: string; webViewLink: string | null; created?: boolean }
 export interface DriveFileRef {
@@ -105,8 +105,8 @@ export async function uploadToFolder(folderId: string, file: { name: string; mim
  * number stays a number whatever the spreadsheet locale of the Drive account
  * (a CSV is parsed with it: « 1245.3 » is text or a date in fr_FR).
  */
-export async function createSheetFromRows(folderId: string, name: string, columns: string[], rows: SheetCell[][]): Promise<{ id: string; webViewLink: string | null }> {
-  const up = await uploadToFolder(folderId, { name, mimeType: XLSX_MIME, data: toXlsx(columns, rows), convertTo: GOOGLE_SHEET_MIME });
+export async function createSheetFromRows(folderId: string, name: string, columns: string[], rows: SheetCell[][], look: { styles?: XlsxStyles; autoFilter?: boolean } = {}): Promise<{ id: string; webViewLink: string | null }> {
+  const up = await uploadToFolder(folderId, { name, mimeType: XLSX_MIME, data: toXlsx(columns, rows, undefined, look), convertTo: GOOGLE_SHEET_MIME });
   return { id: up.id, webViewLink: up.webViewLink };
 }
 

@@ -37,17 +37,18 @@ import { ensureClientSubfolder, uploadToFolder } from "@/lib/clients/drive";
 import { executeAction, hqProjectOf, pilotWritesOpen, prepareAction, type PilotSession } from "@/lib/pilot/service";
 import { adIdentities } from "@/lib/pilot/new-ad";
 import { CALL_TO_ACTIONS } from "@/lib/meta-write";
-import { mergeCreativeMetrics, postMoCards } from "@/lib/mo/thread";
+import { loadBoard, mergeCreativeMetrics, parseMoCards, postMoCards, rewriteMoCard } from "@/lib/mo/thread";
+import { SHEET_COLORS, SHEET_OPS, columnLetter, describeSheetView, sanitizeSheetView, visibleRows, type MoSheetView } from "@/lib/mo/sheet";
 import { searchAdLibrary } from "@/lib/creas/ad-library";
 import { analyseTemplate } from "@/lib/creas/analysis";
 import { ownAdTemplateSource } from "@/lib/creas/templates";
 import { dataUriToRelayImage } from "@/lib/creas/media";
 import { relayUpload } from "@/lib/studio";
-import type { MoCardSpec } from "@/lib/mo/model";
+import type { MoCard, MoCardSpec } from "@/lib/mo/model";
 import type { Playbook, PlaybookCandidate } from "@/lib/creas/playbook-doc";
 import { brandPlaybook, factoryApprove, factoryGenerate, factoryPropose, factoryPublish, factoryVariations, type FactoryToolDeps } from "@/lib/mo/factory-tools";
 
-export const MO_TOOL_NAMES = ["creatives", "metrics", "creative_metrics", "generate_creatives", "meta_targets", "meta_publish_ad", "competitor_ads", "keep_template", "brand_playbook", "factory_propose", "factory_approve", "factory_generate", "factory_variations", "factory_publish"] as const;
+export const MO_TOOL_NAMES = ["creatives", "metrics", "creative_metrics", "generate_creatives", "meta_targets", "meta_publish_ad", "competitor_ads", "keep_template", "brand_playbook", "factory_propose", "factory_approve", "factory_generate", "factory_variations", "factory_publish", "table_format"] as const;
 export type MoToolName = (typeof MO_TOOL_NAMES)[number];
 
 export interface MoToolContext {
@@ -683,6 +684,56 @@ async function playbookCandidate(libraryId: string): Promise<{ candidate: Playbo
 }
 
 /** One ad of the library (or any https picture) kept as a template of the client: picture copied on the relay, analysed (hook, structure, text zones, brief). */
+/**
+ * A table card of the board worked like a spreadsheet on the person's word: « trie par dépense », « garde Meta »,
+ * « mets en vert les ROAS au-dessus de 3 », « dégradé sur le CPA ». Columns are named as shown (or by letter);
+ * the change lands on the card itself — nothing to recopy. `reset` clears what was there first.
+ */
+export async function tableFormat(ctx: MoToolContext, a: Args): Promise<ToolResult> {
+  const cardId = str(a.card, 24);
+  const board = await loadBoard(ctx.boardId, ctx.userId);
+  if (!board) throw new MoToolError("Tableau introuvable.", 404);
+  const tables = parseMoCards(board.cardsJson).filter((c): c is Extract<MoCard, { type: "table" }> => c.type === "table");
+  const card = tables.find((c) => c.id === cardId) ?? (cardId ? undefined : tables[tables.length - 1]);
+  if (!card) throw new MoToolError(cardId ? `La carte ${cardId} n'est pas un tableau du tableau de bord.` : "Aucun tableau à l'écran.", 404);
+  const fold = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+  const colOf = (v: unknown): number => {
+    const q = str(v, 60);
+    if (!q) throw new MoToolError("Il manque le nom de la colonne.");
+    const exact = card.columns.findIndex((c) => fold(c) === fold(q));
+    if (exact >= 0) return exact;
+    const letter = card.columns.findIndex((_, j) => columnLetter(j) === q.toUpperCase());
+    if (letter >= 0) return letter;
+    const near = card.columns.map((c, j) => ({ c, j })).filter((x) => fold(x.c).includes(fold(q)) || fold(q).includes(fold(x.c)));
+    if (near.length === 1) return near[0].j;
+    throw new MoToolError(`Colonne « ${q} » introuvable. Colonnes du tableau : ${card.columns.join(", ")}.`);
+  };
+  const reset = a.reset === true;
+  const base: MoSheetView = reset ? (card.sheet?.widths ? { widths: card.sheet.widths } : {}) : { ...(card.sheet ?? {}) };
+  const list = (v: unknown): Args[] => (Array.isArray(v) ? v.filter((x): x is Args => !!x && typeof x === "object").slice(0, 12) : []);
+  const next: Record<string, unknown> = { ...base };
+  if (a.sort && typeof a.sort === "object") { const s = a.sort as Args; next.sort = { col: colOf(s.column), dir: s.dir === "asc" ? "asc" : "desc" }; }
+  const OPS = "contains, not_contains, eq, neq, gt, gte, lt, lte, empty, not_empty";
+  const opOk = (v: unknown) => typeof v === "string" && (SHEET_OPS as string[]).includes(v);
+  const filters = list(a.filters).map((f) => {
+    if (Array.isArray(f.values)) return { col: colOf(f.column), op: "in", values: f.values };
+    if (!opOk(f.op)) throw new MoToolError(`Condition de filtre inconnue. Possibles : ${OPS}.`);
+    return { col: colOf(f.column), op: f.op, value: f.value };
+  });
+  if (filters.length) next.filters = [...(base.filters ?? []).filter((f) => !filters.some((n) => n.col === f.col)), ...filters];
+  const rules = list(a.rules).map((r) => {
+    if (r.scale === "good" || r.scale === "bad") return { col: colOf(r.column), op: "scale", high: r.scale };
+    if (!opOk(r.op)) throw new MoToolError(`Condition de couleur inconnue. Possibles : ${OPS}.`);
+    if (!(SHEET_COLORS as readonly string[]).includes(String(r.color))) throw new MoToolError(`Couleur inconnue. Possibles : ${SHEET_COLORS.join(", ")}.`);
+    return { col: colOf(r.column), op: r.op, value: r.value, color: r.color, ...(r.row === true ? { scope: "row" } : {}) };
+  });
+  if (rules.length) next.rules = [...(base.rules ?? []), ...rules];
+  const sheet = sanitizeSheetView(next, card.columns.length, card.rows.length);
+  await rewriteMoCard(ctx.boardId, card.id, (c) => (c.type === "table" ? ({ ...c, sheet } as MoCard) : c));
+  const shown = visibleRows(card.rows, sheet).length;
+  return { updated_card: card.id, title: card.title, applied: describeSheetView(card.columns, sheet) || "aucune mise en forme", rows_shown: shown, rows_total: card.rows.length, note: "La carte est déjà à jour à l'écran : dis seulement ce que tu as fait, ne recopie pas le tableau." };
+}
+
 export async function keepTemplate(ctx: MoToolContext, a: Args): Promise<ToolResult> {
   const libraryId = str(a.libraryId, 40).replace(/^adlib:/, "");
   let imageUrl = /^https:\/\//.test(str(a.imageUrl, 2000)) ? str(a.imageUrl, 2000) : "";
@@ -747,6 +798,7 @@ export async function runMoTool(ctx: MoToolContext, tool: string, args: unknown)
     case "meta_publish_ad": return metaPublishAd(ctx, a);
     case "competitor_ads": return competitorAds(ctx, a);
     case "keep_template": return keepTemplate(ctx, a);
+    case "table_format": return tableFormat(ctx, a);
     case "brand_playbook": return brandPlaybook(factoryDeps(ctx), a);
     case "factory_propose": return factoryPropose(factoryDeps(ctx), a);
     case "factory_approve": return factoryApprove(factoryDeps(ctx), a);

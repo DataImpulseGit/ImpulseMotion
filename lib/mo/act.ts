@@ -13,6 +13,8 @@
  * in one place and the flows can be tested with fakes.
  */
 
+import { applySheetEdit, SHEET_PALETTE, styleResolver, visibleRows, type SheetEdit } from "@/lib/mo/sheet";
+import type { XlsxStyles } from "@/lib/xlsx";
 import { CARD_SIZES, COL_GAP, type MoActionKind, type MoCard, type MoCardSpec, type MoCreative, type MoVerdict } from "@/lib/mo/model";
 import { isClientId, matchClientName, type IntentClient } from "@/lib/mo/intents";
 import { typeKpiSheet, typeSheetColumns, type SheetCell } from "@/lib/sheet-values";
@@ -32,7 +34,9 @@ export type ActRequest =
   | { action: "publish_confirm"; cardId: string; primaryText?: string; headline?: string; linkUrl?: string }
   | { action: "upload"; name: string; mime: string; bytes: number; data: string; clientId?: string; x: number; y: number }
   /** « Exporter en Google Sheet » : the rows of a table / KPI / creatives card become a Sheet in the Drive, its link lands on the card. */
-  | { action: "sheet"; cardId: string; said?: string };
+  | { action: "sheet"; cardId: string; said?: string }
+  /** A table card worked by hand like a spreadsheet: sort, filters, colours, cell edits, rows and columns (lib/mo/sheet.ts). */
+  | { action: "table"; cardId: string; edit: SheetEdit };
 
 const CARD_ID_RE = /^[a-z0-9]{3,24}$/i;
 const CLIENT_ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
@@ -87,6 +91,14 @@ export function parseActRequest(body: unknown): ActRequest | { error: string } {
       const bad = needCard(); if (bad) return bad;
       const primaryText = str(b.primaryText, 2000); const headline = str(b.headline, 255); const linkUrl = str(b.linkUrl, 2000);
       return { action: "publish_confirm", cardId, ...(primaryText ? { primaryText } : {}), ...(headline ? { headline } : {}), ...(linkUrl ? { linkUrl } : {}) };
+    }
+    case "table": {
+      const cardId = str(b.cardId, 24);
+      if (!CARD_ID_RE.test(cardId)) return { error: "Carte inconnue." };
+      if (!b.edit || typeof b.edit !== "object") return { error: "Modification illisible." };
+      // Bounded here, re-read by applySheetEdit / sanitizeSheetView: nothing of it is trusted as is.
+      if (JSON.stringify(b.edit).length > 200_000) return { error: "Modification trop grosse." };
+      return { action: "table", cardId, edit: b.edit as SheetEdit };
     }
     case "sheet": {
       const bad = needCard(); if (bad) return bad;
@@ -246,6 +258,28 @@ export function sheetValuesOf(card: MoCard): { columns: string[]; rows: SheetCel
   return card.type === "kpis" ? typeKpiSheet(data.rows) : typeSheetColumns(data.columns, data.rows);
 }
 
+/**
+ * A table card as it goes to Google Sheets: the rows the person sees (filters applied, in the order of the sort),
+ * typed, with the colours of the card — rules, scales and hand styles — brought to a white sheet, and filter buttons.
+ */
+export function sheetExportOf(card: MoCard): { columns: string[]; rows: SheetCell[][]; styles?: XlsxStyles; autoFilter?: boolean } | null {
+  if (card.type !== "table" || !card.sheet) return sheetValuesOf(card);
+  const full = card.rows.map((r) => card.columns.map((_, j) => r[j] ?? ""));
+  const order = visibleRows(full, card.sheet);
+  const typed = typeSheetColumns(card.columns, order.map((i) => full[i]));
+  const styleOf = styleResolver(full, card.sheet);
+  let any = false;
+  const styles: XlsxStyles = order.map((i) => card.columns.map((_, j) => {
+    const st = styleOf(i, j);
+    const fill = st.fill ? SHEET_PALETTE[st.fill].xlsxFill : st.scale ? (st.scale.color === "green" ? (st.scale.strength > 0.5 ? "B6D7A8" : "D9EAD3") : (st.scale.strength > 0.5 ? "EA9999" : "F4CCCC")) : undefined;
+    const color = st.color ? SHEET_PALETTE[st.color].xlsxText : undefined;
+    if (!fill && !color && !st.bold) return undefined;
+    any = true;
+    return { ...(fill ? { fill } : {}), ...(color ? { color } : {}), ...(st.bold ? { bold: true } : {}) };
+  }));
+  return { ...typed, ...(any ? { styles } : {}), autoFilter: true };
+}
+
 /** « Chiffres Naturalia — 29 oct. 2026 » : the sheet's name from the card's title and a date. */
 export function sheetFileName(title: string, at: Date = new Date()): string {
   const clean = title.replace(/[\u0000-\u001f/\\]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80) || "Tableau Mo";
@@ -286,7 +320,7 @@ export interface ActDeps {
   /** The folder a sheet goes to: the client's « Tableaux » (ensureClientSubfolder) when a dashboard is given, else « Mo – Tableaux » under the root (ensureRootSubfolder); null when the client's folder cannot be made. */
   sheetFolder(dashboardId: string | null): Promise<{ id: string } | null>;
   /** lib/clients/drive createSheetFromRows */
-  createSheet(folderId: string, name: string, columns: string[], rows: SheetCell[][]): Promise<{ id: string; webViewLink: string | null }>;
+  createSheet(folderId: string, name: string, columns: string[], rows: SheetCell[][], look?: { styles?: XlsxStyles; autoFilter?: boolean }): Promise<{ id: string; webViewLink: string | null }>;
 }
 
 export interface ActResult {
@@ -489,7 +523,7 @@ export async function runMoAct(req: ActRequest, deps: ActDeps, who: string): Pro
       const card = find(req.cardId);
       if (!card) throw new ActError("Cette carte n'est plus sur le tableau.", 404);
       if (!isSheetCard(card)) throw new ActError("Je n'exporte en Google Sheet que les tableaux, les KPI et les créas.", 400);
-      const data = sheetValuesOf(card);
+      const data = sheetExportOf(card);
       if (!data || !data.columns.length) throw new ActError("Cette carte n'a pas de lignes à exporter.", 400);
       const client = cardClientOf(card, clients);
       let folder: { id: string } | null;
@@ -497,11 +531,25 @@ export async function runMoAct(req: ActRequest, deps: ActDeps, who: string): Pro
       if (!folder) throw new ActError("Je ne trouve pas de dossier Drive où poser la feuille.", 502);
       const name = sheetFileName(card.title);
       let sheet: { id: string; webViewLink: string | null };
-      try { sheet = await deps.createSheet(folder.id, name, data.columns, data.rows); } catch (e) { throw new ActError(`Google Sheets n'a pas répondu : ${toolErrorMessage(e)}`, 502); }
+      try { sheet = data.styles || data.autoFilter
+        ? await deps.createSheet(folder.id, name, data.columns, data.rows, { ...(data.styles ? { styles: data.styles } : {}), ...(data.autoFilter ? { autoFilter: true } : {}) })
+        : await deps.createSheet(folder.id, name, data.columns, data.rows); } catch (e) { throw new ActError(`Google Sheets n'a pas répondu : ${toolErrorMessage(e)}`, 502); }
       const link = sheet.webViewLink ?? `https://docs.google.com/spreadsheets/d/${sheet.id}/edit`;
       const updated = await deps.rewriteCard(card.id, (c) => ({ ...c, link, linkLabel: "Google Sheet", at: new Date().toISOString() }) as MoCard);
       await deps.journal({ kind: "sheet", ...(client ? { clientId: client.id } : {}), cardIds: [card.id], label: `Tableau « ${shortLabel(card.title)} » exporté dans Google Sheets${client ? ` (${client.name})` : ""}` }, req.said);
       return { say: "C'est dans Google Sheets, le lien est sur la carte.", cardIds: [card.id], ...(updated ? { card: updated } : {}) };
+    }
+
+    case "table": {
+      const card = find(req.cardId);
+      if (!card || card.type !== "table") throw new ActError("Cette carte n'est plus un tableau du tableau de bord.", 404);
+      const updated = await deps.rewriteCard(card.id, (c) => {
+        if (c.type !== "table") return c;
+        const next = applySheetEdit(c, req.edit);
+        return { ...c, columns: next.columns, rows: next.rows, align: next.align, sheet: next.sheet } as MoCard;
+      });
+      // Not journaled: a sort or a colour is not an event of the day.
+      return { say: "", cardIds: [card.id], ...(updated ? { card: updated } : {}) };
     }
 
     case "upload": {

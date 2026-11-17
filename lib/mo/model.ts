@@ -8,6 +8,8 @@
  * This module is client-safe (types + pure parsing); storage is in ./thread.
  */
 
+import { sanitizeSheetView, type MoSheetView } from "@/lib/mo/sheet";
+
 export type MoCardType = "kpis" | "table" | "chart" | "creatives" | "note" | "ask" | "file" | "action" | "frame" | "browser";
 export type MoTone = "good" | "bad" | "neutral";
 /** The consultant's verdict on a visual: kept (green) or cut (grey). */
@@ -86,7 +88,8 @@ export interface MoPublishAction {
 /** The content of a card, by type. */
 export type MoCardPayload =
   | { type: "kpis"; items: MoKpi[] }
-  | { type: "table"; columns: string[]; rows: string[][]; align?: Array<"left" | "right"> }
+  /** A table, worked like a spreadsheet: `sheet` = the sort, filters, colours the person (or Mo) put on it (lib/mo/sheet.ts). */
+  | { type: "table"; columns: string[]; rows: string[][]; align?: Array<"left" | "right">; sheet?: MoSheetView }
   | { type: "chart"; kind: "line" | "bar"; x: string[]; series: MoSeries[]; unit?: string }
   | { type: "creatives"; items: MoCreative[] }
   | { type: "note"; markdown: string }
@@ -309,7 +312,8 @@ function sanitizeCard(raw: unknown): MoCardSpec | null {
         .filter((row) => row.some(Boolean))
         .map((row) => { while (row.length < columns.length) row.push(""); return row; });
       const align = Array.isArray(r.align) ? r.align.slice(0, columns.length).map((a) => (a === "right" ? "right" as const : "left" as const)) : undefined;
-      return { ...base, type: "table", columns, rows, ...(align ? { align } : {}) };
+      const sheet = sanitizeSheetView(r.sheet, columns.length, rows.length);
+      return { ...base, type: "table", columns, rows, ...(align ? { align } : {}), ...(sheet ? { sheet } : {}) };
     }
     case "chart": {
       const kind = r.kind === "bar" ? "bar" as const : "line" as const;

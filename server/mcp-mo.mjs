@@ -67,6 +67,18 @@ server.registerTool("creatives", {
   },
 }, async (args) => call("creatives", args, 60_000));
 
+server.registerTool("table_format", {
+  title: "Trier, filtrer, colorer un tableau",
+  description: "Travaille une carte « table » du tableau comme un tableur, sur demande (« trie par dépense », « garde seulement Meta », « mets en vert les ROAS au-dessus de 3 », « dégradé sur le CPA ») : la carte est modifiée sur place, tu n'as RIEN à recopier. Les colonnes se nomment comme à l'écran. Pour une couleur de coût (CPA, CPL, CPC, CPM) haut = mauvais ; pour un ROAS, un CTR, des conversions haut = bon.",
+  inputSchema: {
+    card: z.string().max(24).optional().describe("Id de la carte tableau (liste des cartes à l'écran). Absent = le dernier tableau."),
+    sort: z.object({ column: z.string().max(60), dir: z.enum(["asc", "desc"]).optional() }).optional().describe("Tri (défaut : décroissant)."),
+    filters: z.array(z.object({ column: z.string().max(60), op: z.enum(["contains", "not_contains", "eq", "neq", "gt", "gte", "lt", "lte", "empty", "not_empty"]).optional(), value: z.string().max(160).optional(), values: z.array(z.string().max(160)).max(60).optional().describe("Garder seulement ces valeurs exactes (à la place de op/value).") })).max(12).optional(),
+    rules: z.array(z.object({ column: z.string().max(60), op: z.enum(["contains", "not_contains", "eq", "neq", "gt", "gte", "lt", "lte", "empty", "not_empty"]).optional(), value: z.string().max(160).optional(), color: z.enum(["green", "red", "yellow", "orange", "blue", "purple", "gray"]).optional(), row: z.boolean().optional().describe("true = colorer toute la ligne."), scale: z.enum(["good", "bad"]).optional().describe("Dégradé sur la colonne : good = les valeurs hautes sont bonnes (vert), bad = mauvaises (rouge). Remplace op/value/color.") })).max(12).optional(),
+    reset: z.boolean().optional().describe("true = retire d'abord tri, filtres et couleurs déjà posés."),
+  },
+}, async (args) => call("table_format", args, 30_000));
+
 server.registerTool("metrics", {
   title: "Chiffres d'un client",
   description: "Les chiffres d'un client sur une période (dépense, leads/conversions, CPL/CPA, CTR, CPM, ROAS) avec l'écart contre la période précédente de même longueur, depuis l'entrepôt (Meta + Google + TikTok, 3 s). POSE LUI-MÊME la carte KPI (et un tableau par campagne / ensemble / format avec `by`) : tu n'as que la phrase à dire. La réponse à « le CPA de Naturalia cette semaine », « ça donne quoi sur LPEV ce mois-ci », « par campagne ».",

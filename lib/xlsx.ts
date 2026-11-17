@@ -32,8 +32,41 @@ const NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const NS_PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships";
 
-/** The worksheet and shared-strings XML of a header (bold, frozen) and rows. */
-export function worksheetXml(columns: string[], rows: SheetCell[][]): { sheet: string; sharedStrings: string } {
+/** How one data cell looks in the sheet: a fill and a text colour (RRGGBB), bold. */
+export interface XlsxCellStyle { fill?: string; color?: string; bold?: boolean }
+/** Styles of the data rows, by row then column (same shape as `rows`; holes = plain). */
+export type XlsxStyles = Array<Array<XlsxCellStyle | undefined> | undefined>;
+
+const HEX = /^[0-9A-Fa-f]{6}$/;
+/** The fonts, fills and cell formats a sheet uses: 0 = plain, 1 = header (bold); the rest is added as cells ask for it. */
+function styleRegistry() {
+  const fonts = ['<font><sz val="10"/><name val="Arial"/></font>', '<font><b/><sz val="10"/><name val="Arial"/></font>'];
+  const fills = ['<fill><patternFill patternType="none"/></fill>', '<fill><patternFill patternType="gray125"/></fill>'];
+  const xfs = ['<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>', '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>'];
+  const fontIds = new Map<string, number>(); const fillIds = new Map<string, number>(); const xfIds = new Map<string, number>();
+  const idOf = (st: XlsxCellStyle | undefined): number => {
+    const fill = st?.fill && HEX.test(st.fill) ? st.fill.toUpperCase() : ""; const color = st?.color && HEX.test(st.color) ? st.color.toUpperCase() : ""; const bold = st?.bold === true;
+    if (!fill && !color && !bold) return 0;
+    const key = `${fill}|${color}|${bold ? 1 : 0}`;
+    const known = xfIds.get(key);
+    if (known !== undefined) return known;
+    let fontId = 0;
+    if (color || bold) {
+      const fk = `${color}|${bold ? 1 : 0}`;
+      fontId = fontIds.get(fk) ?? (fontIds.set(fk, fonts.length), fonts.push(`<font>${bold ? "<b/>" : ""}<sz val="10"/>${color ? `<color rgb="FF${color}"/>` : ""}<name val="Arial"/></font>`) - 1);
+    }
+    let fillId = 0;
+    if (fill) fillId = fillIds.get(fill) ?? (fillIds.set(fill, fills.length), fills.push(`<fill><patternFill patternType="solid"><fgColor rgb="FF${fill}"/><bgColor indexed="64"/></patternFill></fill>`) - 1);
+    const id = xfs.push(`<xf numFmtId="0" fontId="${fontId}" fillId="${fillId}" borderId="0" xfId="0"${fontId ? ' applyFont="1"' : ""}${fillId ? ' applyFill="1"' : ""}/>`) - 1;
+    xfIds.set(key, id);
+    return id;
+  };
+  const xml = () => `${XML_HEAD}<styleSheet xmlns="${NS_MAIN}"><fonts count="${fonts.length}">${fonts.join("")}</fonts><fills count="${fills.length}">${fills.join("")}</fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="${xfs.length}">${xfs.join("")}</cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
+  return { idOf, xml };
+}
+
+/** The worksheet, shared-strings and styles XML of a header (bold, frozen, with filter buttons when asked) and rows. */
+export function worksheetXml(columns: string[], rows: SheetCell[][], opts: { styles?: XlsxStyles; autoFilter?: boolean } = {}): { sheet: string; sharedStrings: string; styles: string } {
   const strings: string[] = [];
   const index = new Map<string, number>();
   const sst = (s: string) => {
@@ -41,32 +74,36 @@ export function worksheetXml(columns: string[], rows: SheetCell[][]): { sheet: s
     if (i === undefined) { i = strings.length; strings.push(s); index.set(s, i); }
     return i;
   };
+  const registry = styleRegistry();
   const width = columns.length;
-  const cell = (v: SheetCell | undefined, ref: string, style: string) => {
-    if (v === null || v === undefined || v === "") return "";
+  const cell = (v: SheetCell | undefined, ref: string, styleId: number) => {
+    const style = styleId ? ` s="${styleId}"` : "";
+    // An empty cell is written only when it carries a style (a coloured blank).
+    if (v === null || v === undefined || v === "") return styleId ? `<c r="${ref}"${style}/>` : "";
     if (typeof v === "number") return Number.isFinite(v) ? `<c r="${ref}"${style}><v>${v}</v></c>` : "";
     return `<c r="${ref}"${style} t="s"><v>${sst(v)}</v></c>`;
   };
-  const rowXml = (cells: Array<SheetCell | undefined>, r: number, header: boolean) =>
-    `<row r="${r}">${Array.from({ length: width }, (_, j) => cell(cells[j], `${columnName(j)}${r}`, header ? ' s="1"' : "")).join("")}</row>`;
-  const body = [rowXml(columns, 1, true), ...rows.map((row, i) => rowXml(row, i + 2, false))].join("");
-  const sheet = `${XML_HEAD}<worksheet xmlns="${NS_MAIN}" xmlns:r="${NS_REL}"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetData>${body}</sheetData></worksheet>`;
+  const rowXml = (cells: Array<SheetCell | undefined>, r: number, styleOf: (j: number) => number) =>
+    `<row r="${r}">${Array.from({ length: width }, (_, j) => cell(cells[j], `${columnName(j)}${r}`, styleOf(j))).join("")}</row>`;
+  const body = [rowXml(columns, 1, () => 1), ...rows.map((row, i) => rowXml(row, i + 2, (j) => registry.idOf(opts.styles?.[i]?.[j])))].join("");
+  const filter = opts.autoFilter && width > 0 ? `<autoFilter ref="A1:${columnName(width - 1)}${rows.length + 1}"/>` : "";
+  const sheet = `${XML_HEAD}<worksheet xmlns="${NS_MAIN}" xmlns:r="${NS_REL}"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetData>${body}</sheetData>${filter}</worksheet>`;
   const sharedStrings = `${XML_HEAD}<sst xmlns="${NS_MAIN}" count="${strings.length}" uniqueCount="${strings.length}">${strings.map((s) => `<si><t xml:space="preserve">${xmlEscape(s)}</t></si>`).join("")}</sst>`;
-  return { sheet, sharedStrings };
+  return { sheet, sharedStrings, styles: registry.xml() };
 }
 
 /** A sheet name Excel and Sheets accept: ≤ 31 characters, none of []:*?/\. */
 export const safeSheetName = (name: string): string => name.replace(/[[\]:*?/\\]/g, " ").replace(/\s+/g, " ").trim().slice(0, 31) || "Tableau";
 
 /** The .xlsx parts (path → XML). */
-export function xlsxParts(columns: string[], rows: SheetCell[][], sheetName = "Tableau"): Record<string, string> {
-  const { sheet, sharedStrings } = worksheetXml(columns, rows);
+export function xlsxParts(columns: string[], rows: SheetCell[][], sheetName = "Tableau", opts: { styles?: XlsxStyles; autoFilter?: boolean } = {}): Record<string, string> {
+  const { sheet, sharedStrings, styles } = worksheetXml(columns, rows, opts);
   return {
     "[Content_Types].xml": `${XML_HEAD}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>`,
     "_rels/.rels": `${XML_HEAD}<Relationships xmlns="${NS_PKG_REL}"><Relationship Id="rId1" Type="${NS_REL}/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
     "xl/workbook.xml": `${XML_HEAD}<workbook xmlns="${NS_MAIN}" xmlns:r="${NS_REL}"><sheets><sheet name="${xmlEscape(safeSheetName(sheetName))}" sheetId="1" r:id="rId1"/></sheets></workbook>`,
     "xl/_rels/workbook.xml.rels": `${XML_HEAD}<Relationships xmlns="${NS_PKG_REL}"><Relationship Id="rId1" Type="${NS_REL}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="${NS_REL}/styles" Target="styles.xml"/><Relationship Id="rId3" Type="${NS_REL}/sharedStrings" Target="sharedStrings.xml"/></Relationships>`,
-    "xl/styles.xml": `${XML_HEAD}<styleSheet xmlns="${NS_MAIN}"><fonts count="2"><font><sz val="10"/><name val="Arial"/></font><font><b/><sz val="10"/><name val="Arial"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`,
+    "xl/styles.xml": styles,
     "xl/worksheets/sheet1.xml": sheet,
     "xl/sharedStrings.xml": sharedStrings,
   };
@@ -143,6 +180,6 @@ export function zipStored(files: Record<string, string | Buffer>, at: Date = new
 }
 
 /** The .xlsx bytes of a header and typed rows. */
-export function toXlsx(columns: string[], rows: SheetCell[][], sheetName?: string): Buffer {
-  return zipStored(xlsxParts(columns, rows, sheetName));
+export function toXlsx(columns: string[], rows: SheetCell[][], sheetName?: string, opts: { styles?: XlsxStyles; autoFilter?: boolean } = {}): Buffer {
+  return zipStored(xlsxParts(columns, rows, sheetName, opts));
 }

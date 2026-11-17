@@ -79,7 +79,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       return { link: up.webViewLink };
     },
     sheetFolder: (dashboardId) => (dashboardId ? ensureClientSubfolder(dashboardId, "tables") : ensureRootSubfolder(MO_TABLES_ROOT_FOLDER.name, MO_TABLES_ROOT_FOLDER.description)),
-    createSheet: (folderId, name, columns, rows) => createSheetFromRows(folderId, name, columns, rows),
+    createSheet: (folderId, name, columns, rows, look) => createSheetFromRows(folderId, name, columns, rows, look),
   };
 
   const t0 = Date.now();

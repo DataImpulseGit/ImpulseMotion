@@ -32,6 +32,7 @@ import { warmMoBoard } from "@/components/mo/warm";
 import { WaveCanvas, type WaveMood } from "@/components/mo/wave-canvas";
 import { useVoice } from "@/components/mo/use-voice";
 import { CARD_SIZES, COL_GAP, type MoBoardData, type MoCard, type MoCardPatch, type MoCardSpec } from "@/lib/mo/model";
+import { applySheetEdit, type SheetEdit } from "@/lib/mo/sheet";
 import { MAX_UPLOAD_BYTES, cardClientOf, fileKindOf, isSheetCard, type SheetCard } from "@/lib/mo/act";
 import { GRID, SNAP_SCREEN_PX, arrangeCards, linkAnchors, linkPath, rectOf, resizeRect, snapMove, topZ, type ArrangeLayout, type Guide, type HandleDir, type Rect } from "@/lib/mo/geometry";
 
@@ -798,6 +799,16 @@ export function MoPage() {
     const body: Record<string, unknown> = action === "keep" || action === "cut" ? { action: "verdict", verdict: action } : action === "metrics" ? { action: "creative_metrics" } : action === "figcraft" || action === "photocraft" ? { action: "open_editor", editor: action } : action === "drive" ? { action: "drive" } : { action: "publish_prepare" };
     void act({ ...body, cardId, item: index }, { cardId, key: `item:${index}:${action}` });
   }, [act]);
+  /** A table worked like a spreadsheet: shown at once (same pure function as the server), then saved — edits of one board go up in order. */
+  const tableSaves = useRef<Promise<unknown>>(Promise.resolve());
+  const onTableEdit = useCallback((cardId: string, edit: SheetEdit) => {
+    const b = boardStateRef.current; if (!b) return;
+    setBoard((bb) => (bb ? { ...bb, cards: bb.cards.map((c): MoCard => { if (c.id !== cardId || c.type !== "table") return c; const next = applySheetEdit(c, edit); return { ...c, columns: next.columns, rows: next.rows, align: next.align, sheet: next.sheet }; }) } : bb));
+    tableSaves.current = tableSaves.current.then(() => fetch(`/api/mo/${b.id}/act`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "table", cardId, edit }) }))
+      .then((res) => { if (res instanceof Response && !res.ok) setError("Le tableau n'a pas pu être enregistré."); })
+      .catch(() => setError("Le tableau n'a pas pu être enregistré."));
+  }, []);
+
   const onConfirmPublish = useCallback((cardId: string, edits: PublishEdits) => { void act({ action: "publish_confirm", cardId, ...edits }, { cardId, key: "confirm" }); }, [act]);
   /** « Google Sheet » in a card's header (or S on the selected card): its rows exported, the link lands on the card. */
   const onCardAction = useCallback((cardId: string, action: WholeCardAction) => { if (action === "sheet") void act({ action: "sheet", cardId }, { cardId, key: "sheet" }); }, [act]);
@@ -1036,7 +1047,7 @@ export function MoPage() {
           <MoCardView key={c.id} card={c} fresh={fresh.has(c.id)} delayMs={(freshOrder.get(c.id) ?? 0) * 60} selected={selected.has(c.id)} refTitle={c.ref ? titles.get(c.ref) ?? null : null} getK={getK}
             onMove={onMove} onMoveEnd={onMoveEnd} onResizeStart={onResizeStart} onResize={onResize} onResizeEnd={onResizeEnd}
             onFront={onFront} onSelect={onSelect} onToggle={onToggle} onClose={onClose} onFocusRef={onFocusRef} onHoverRef={onHoverRef} onAnswer={onAnswer}
-            onItemAction={onItemAction} onItemHover={onItemHover} onConfirmPublish={onConfirmPublish} onCardAction={onCardAction} busy={acting?.cardId === c.id ? acting.key : null} />
+            onItemAction={onItemAction} onItemHover={onItemHover} onConfirmPublish={onConfirmPublish} onTableEdit={onTableEdit} onCardAction={onCardAction} busy={acting?.cardId === c.id ? acting.key : null} />
         ))}
         {ghost && <MoGhostCard ghost={ghost} onRetry={() => { setGhost(null); void send(ghost.text); }} onClose={() => setGhost(null)} />}
         {uploads.map((up) => <MoUploadCard key={up.id} up={up} onClose={() => { if (up.preview) URL.revokeObjectURL(up.preview); setUploads((u) => u.filter((x) => x.id !== up.id)); }} />)}
