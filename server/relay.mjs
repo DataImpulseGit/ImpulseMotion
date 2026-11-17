@@ -588,6 +588,10 @@ const SERVER_TOOL_ALLOWLIST = {
   [MAGENTO_SERVER]: MAGENTO_READ_TOOLS,
 };
 
+// Write tools the scope proxy reopens for the TEAM's chats, named one by one (server/mcp-scoped-ads.mjs).
+// Everything else that creates or modifies stays closed; a client's bot gets none of these.
+const STAFF_OPEN_WRITES = { "mcp-google-ads": ["Create_Conversion_Action"] };
+
 /** Tools of a server open to this chat: fewer for a client bot where it matters. */
 function chatToolsOf(server, clientBot) {
   if (server === TIKTOK_SERVER && clientBot) return TIKTOK_CLIENT_TOOLS;
@@ -929,6 +933,9 @@ function buildScopedMcpConfig({ servers, clientKey, clientKeys = null, accountSc
         ...(N8N_TOOLS_TOKEN && isN8nToolsUrl(upstream.url) ? { SCOPED_UPSTREAM_TOKEN: N8N_TOOLS_TOKEN } : {}),
         SCOPED_ACCOUNTS: ids.join(","),
         ...(PROXY_PINNED_TOOLS.has(name) ? { SCOPED_TOOLS: (chatToolsOf(name, clientBot) || []).join(",") } : {}),
+        // Consultants (assistant, Mo, copilote) may create a Google Ads conversion action on the accounts of
+        // their scope; a client's bot never gets a write tool.
+        ...(!clientBot && STAFF_OPEN_WRITES[name] ? { SCOPED_WRITES: STAFF_OPEN_WRITES[name].join(",") } : {}),
       },
     };
     kept.push(name);

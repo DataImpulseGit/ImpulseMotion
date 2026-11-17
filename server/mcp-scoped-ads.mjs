@@ -19,6 +19,8 @@
  *   SCOPED_UPSTREAM_URL — URL SSE du serveur n8n
  *   SCOPED_ACCOUNTS     — identifiants autorisés, séparés par des virgules
  *   SCOPED_TOOLS        — (option) seuls outils ouverts, séparés par des virgules
+ *   SCOPED_WRITES       — (option) outils d'écriture ouverts malgré tout, nommés un par un : posé par le relay pour
+ *                         l'équipe seulement (jamais pour le bot d'un client), le périmètre de comptes s'applique
  * Refuse de démarrer si l'une manque ou si le périmètre est vide (fail-closed).
  */
 
@@ -72,8 +74,8 @@ export const PROFILES = {
     keys: /customer/i,
     norm: (v) => String(v).trim().replace(/-/g, "").replace(/^0+/, ""),
     deny: new Set(["List_Customers"]),
-    // Outils d'écriture (Create_Conversion_Action…) : jamais depuis un chat,
-    // même règle que GA4. Le bot d'un client y aurait sinon accès.
+    // Outils d'écriture : fermés par défaut — le bot d'un client y aurait sinon accès.
+    // Le relay rouvre Create_Conversion_Action aux consultants (SCOPED_WRITES), sur leurs comptes.
     denyPattern: /^(create|update|delete|remove|mutate|archive)_/i,
   },
   "mcp-google-analytics": {
@@ -222,7 +224,7 @@ export function unreadableInput(args) {
  * @param {{ label: string, keys: RegExp, norm: (v: unknown) => string, deny: Set<string>, denyPattern?: RegExp, prepare?: Function, accountsOf?: Function }} p
  * @param {{ accounts: string, tools?: string }} scope  accounts: ids separated by commas, or "*" (no account filter)
  */
-export function createGate(p, { accounts, tools = "" }) {
+export function createGate(p, { accounts, tools = "", writes = "" }) {
   // "*" = périmètre illimité (admins, Business Manager entier) : aucun compte
   // n'est filtré, tout le reste s'applique.
   const unrestricted = accounts.trim() === "*";
@@ -233,7 +235,9 @@ export function createGate(p, { accounts, tools = "" }) {
   if (p.closedTools && !only.length) throw new Error("liste d'outils (SCOPED_TOOLS) manquante");
   const onlyTools = only.length ? new Set(only) : null;
 
-  const isWrite = (name) => (p.denyPattern ? p.denyPattern.test(name) : false);
+  // Écritures rouvertes nommément par le relay (équipe seulement) ; toute autre reste fermée.
+  const openWrites = new Set(writes.split(",").map((s) => s.trim()).filter(Boolean));
+  const isWrite = (name) => (p.denyPattern ? p.denyPattern.test(name) && !openWrites.has(name) : false);
   const isClosed = (name) => (onlyTools ? !onlyTools.has(name) : false);
   const isDenied = (name) => p.deny.has(name) || isWrite(name) || isClosed(name);
   const outside = (ids) => (ids.includes(UNREADABLE)
@@ -273,13 +277,14 @@ export function createGate(p, { accounts, tools = "" }) {
   }
 
   /** The tools a conversation sees: the open ones, their description corrected where the profile knows better. */
-  const listed = (tools) => tools.filter((t) => !isDenied(t.name)).map((t) => (p.describe ? { ...t, description: p.describe(t.name, t.description) } : t));
+  const WRITE_NOTE = "ÉCRITURE RÉELLE sur le compte du client : annonce d'abord ce que tu vas créer (compte, nom, catégorie, valeur) et attends un « oui » explicite de la personne avant d'appeler cet outil. ";
+  const listed = (tools) => tools.filter((t) => !isDenied(t.name)).map((t) => (p.describe ? { ...t, description: p.describe(t.name, t.description) } : t)).map((t) => (openWrites.has(t.name) ? { ...t, description: `${WRITE_NOTE}${t.description || ""}` } : t));
 
   return { unrestricted, allowed, isDenied, listed, check };
 }
 
 let gate;
-try { gate = createGate(profile, { accounts: RAW_ACCOUNTS, tools: process.env.SCOPED_TOOLS || "" }); }
+try { gate = createGate(profile, { accounts: RAW_ACCOUNTS, tools: process.env.SCOPED_TOOLS || "", writes: process.env.SCOPED_WRITES || "" }); }
 catch (err) { die(`${err.message} pour ${SERVER_NAME}`); }
 
 // ── Amont (SSE) ──────────────────────────────────────────────────────────────

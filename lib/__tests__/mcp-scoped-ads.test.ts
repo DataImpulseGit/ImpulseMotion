@@ -279,7 +279,7 @@ describe("the gate of a TikTok conversation", () => {
 
 describe("the gate of the other servers", () => {
   type Decision = { refusal: string } | { args: unknown };
-  let createGate: (profile: unknown, scope: { accounts: string; tools?: string }) => { check: (name: string, given: unknown, opts?: { legacy?: boolean }) => Decision };
+  let createGate: (profile: unknown, scope: { accounts: string; tools?: string; writes?: string }) => { check: (name: string, given: unknown, opts?: { legacy?: boolean }) => Decision; listed: (tools: Array<{ name: string; description?: string }>) => Array<{ name: string; description?: string }> };
   let profiles: Record<string, unknown>;
   beforeAll(async () => {
     const mod = await import("../../server/mcp-scoped-ads.mjs");
@@ -313,6 +313,20 @@ describe("the gate of the other servers", () => {
     expect(g.check("Campaign_Performance", args)).toEqual({ args });
     // …but never what writes.
     expect("refusal" in g.check("Create_Conversion_Action", args)).toBe(true);
+  });
+
+  it("reopens a named write tool for the team, inside the scope of accounts only", () => {
+    const g = createGate(profiles["mcp-google-ads"], { accounts: "111", writes: "Create_Conversion_Action" });
+    // The consultant's account: goes through. Another account, or another write tool: refused.
+    expect("args" in g.check("Create_Conversion_Action", { customer_id: "111", name: "Achat" })).toBe(true);
+    expect("refusal" in g.check("Create_Conversion_Action", { customer_id: "999", name: "Achat" })).toBe(true);
+    expect("refusal" in g.check("Update_Campaign_Budget", { customer_id: "111" })).toBe(true);
+    expect("refusal" in g.check("Delete_Conversion_Action", { customer_id: "111" })).toBe(true);
+    // Listed with the confirmation rule in front of its description; hidden when not reopened (a client's bot).
+    const tools = [{ name: "Create_Conversion_Action", description: "Crée une action de conversion." }, { name: "Campaign_Performance", description: "Lit." }];
+    expect(g.listed(tools).find((t) => t.name === "Create_Conversion_Action")?.description).toMatch(/^ÉCRITURE RÉELLE.*oui.*Crée une action/);
+    const bot = createGate(profiles["mcp-google-ads"], { accounts: "111" });
+    expect(bot.listed(tools).map((t) => t.name)).toEqual(["Campaign_Performance"]);
   });
 });
 
