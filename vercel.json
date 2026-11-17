@@ -47,6 +47,9 @@
     },
     "app/api/cron/ads-ai-tags/route.ts": {
       "maxDuration": 300
+    },
+    "app/api/cron/bot-packs/route.ts": {
+      "maxDuration": 300
     }
   },
   "crons": [
@@ -241,6 +244,22 @@
     {
       "path": "/api/cron/weekly-recap",
       "schedule": "0 7 * * 1"
+    },
+    {
+      "path": "/api/cron/bot-packs",
+      "schedule": "40 5 * * *"
+    },
+    {
+      "path": "/api/cron/bot-packs",
+      "schedule": "40 7 * * *"
+    },
+    {
+      "path": "/api/cron/bot-packs",
+      "schedule": "40 11 * * *"
+    },
+    {
+      "path": "/api/cron/bot-packs",
+      "schedule": "40 14 * * *"
     }
   ]
 }
