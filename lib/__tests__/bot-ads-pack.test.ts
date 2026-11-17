@@ -86,3 +86,40 @@ describe("bot ads pack — classement des meilleures créas", () => {
     expect(t).toContain("utilise DIRECTEMENT les classements");
   });
 });
+
+describe("bot ads pack — libellés des totaux (avis Decathlon Travel, 16/11/2026)", () => {
+  const base = { spend: 11989, impressions: 2469329, reach: 0, frequency: 0, clicks: 54878, linkClicks: 28819, ctr: 1.17, ctrAll: 2.22, cpc: 0, cpm: 4.86, conversions: 136, cpa: 88.16, cvr: 0, conversionValue: 38973, roas: 3.25, aov: 0, purchases: 24, leads: 136, videoPlays: 0, video3s: 0, thruPlays: 0, hookRate: 0, holdRate: 0, p25Rate: 0, p50Rate: 0, p75Rate: 0, p100Rate: 0, hookScore: 0, watchScore: 0, clickScore: 0, convertScore: 0, estimated: false, roasUnavailable: false };
+
+  it("compte Meta qui convertit en leads : achats et leads nommés séparément, jamais « conversions » à côté de la valeur", async () => {
+    const { totalsLine, conversionKind } = await import("@/lib/bot-ads-pack");
+    expect(conversionKind(base)).toBe("leads");
+    const line = totalsLine(base, null, "EUR");
+    expect(line).toMatch(/achats 24 · coût par achat 500/);
+    expect(line).toMatch(/leads \(formulaires, pas des achats\) 136 · coût par lead 88,16/);
+    expect(line).toContain("valeur des achats");
+    expect(line).not.toMatch(/· conversions /);
+    expect(line).toMatch(/CTR lien 1,2 %.*CTR tous clics 2,2 %/);
+  });
+
+  it("compte e-commerce : libellé inchangé", async () => {
+    const { totalsLine, conversionKind } = await import("@/lib/bot-ads-pack");
+    const m = { ...base, conversions: 24, leads: 0, cpa: 499.5 };
+    expect(conversionKind(m)).toBe("purchases");
+    expect(totalsLine(m, null, "EUR")).toMatch(/conversions 24 · CPA 500/);
+  });
+
+  it("Google : total du compte entier lu en direct (Performance Max comprise), écarts sur la même base", async () => {
+    const { googleTotals, totalsLine } = await import("@/lib/bot-ads-pack");
+    const days = [
+      { date: "2026-11-02", spend: 16562.22, impressions: 593726, clicks: 24203, conversions: 26.08, conversionValue: 27899.3 },
+      { date: "2026-11-09", spend: 14688.11, impressions: 525174, clicks: 26787, conversions: 24.4, conversionValue: 22872.65 },
+    ];
+    const cur = googleTotals(days, { since: "2026-11-09", until: "2026-11-15" }, { ...base, leads: 0 });
+    const prev = googleTotals(days, { since: "2026-11-02", until: "2026-11-08" }, { ...base, leads: 0 });
+    expect(cur.spend).toBe(14688.11);
+    expect(cur.roas).toBe(1.56);
+    const line = totalsLine(cur, prev, "EUR");
+    expect(line).toMatch(/dépense 14\s688\s€ \(-11 %\)/);
+    expect(line).toMatch(/ROAS 1,56 \(-7 %\)/);
+  });
+});

@@ -18,6 +18,7 @@ import { prisma } from "@/lib/prisma";
 import { GLOSSARY_LABELS, type GlossaryKey } from "@/lib/ads-warehouse/glossary-labels";
 import { fmtMetric } from "@/lib/ads-warehouse/metrics-ui";
 import { readableAdName } from "@/lib/ad-readable-name";
+import { googleAccountDaily, type GoogleAccountDay } from "@/lib/ads-warehouse/google";
 
 export interface BotAdsAccounts { meta?: string | null; google?: string | null; tiktok?: string[] }
 
@@ -67,14 +68,61 @@ function delta(cur: number, prev: number | undefined): string {
   return ` (${d > 0 ? "+" : ""}${Math.round(d * 100)} %)`;
 }
 
-/** One line of account totals for a period. */
-export function totalsLine(m: Metrics, prev: Metrics | null, cur: string | null): string {
-  const f = (k: "ctr" | "cpm" | "hookRate") => fmtMetric(k, m[k], cur, m);
-  const parts = [`dépense ${money(m.spend, cur)}${delta(m.spend, prev?.spend)}`, `impressions ${num(m.impressions)}`, `CTR ${f("ctr")}`, `CPM ${f("cpm")}`];
-  if (m.conversions > 0) parts.push(`conversions ${num(m.conversions)}${delta(m.conversions, prev?.conversions)}`, `CPA ${money(m.cpa, cur)}${delta(m.cpa, prev?.cpa)}`);
-  if (!m.roasUnavailable && m.conversionValue > 0) parts.push(`valeur ${money(m.conversionValue, cur)}`, `ROAS ${m.roas.toLocaleString("fr-FR", { maximumFractionDigits: 2 })}${m.estimated ? " (estimé)" : ""}${delta(m.roas, prev?.roas)}`);
+/**
+ * What the account's « conversions » really are. A Meta account that converts
+ * mostly in leads has conversions = leads while its value / ROAS come from the
+ * purchases: written as « conversions 136 · valeur 38 973 € », the client reads
+ * 136 purchases. Each event is named, with its own cost.
+ */
+export function conversionKind(m: Metrics): "purchases" | "leads" | "other" {
+  const same = (a: number, b: number) => Math.abs(a - b) < 0.5;
+  if (m.leads > 0 && same(m.conversions, m.leads) && !same(m.leads, m.purchases)) return "leads";
+  if (m.purchases > 0 && !same(m.conversions, m.purchases)) return "other";
+  return "purchases";
+}
+
+/** Conversions of a period, each event under its own name (never « conversions » next to a purchase value when they are leads). */
+function conversionParts(m: Metrics, prev: Metrics | null, cur: string | null, purchaseWord: string): string[] {
+  const kind = conversionKind(m);
+  const cost = (spend: number, n: number) => (n > 0 ? spend / n : 0);
+  const parts: string[] = [];
+  if (kind === "purchases") {
+    if (m.conversions > 0) parts.push(`${purchaseWord} ${num(m.conversions)}${delta(m.conversions, prev?.conversions)}`, `CPA ${money(m.cpa, cur)}${delta(m.cpa, prev?.cpa)}`);
+    return parts;
+  }
+  if (m.purchases > 0) parts.push(`achats ${num(m.purchases)}${delta(m.purchases, prev?.purchases)}`, `coût par achat ${money(cost(m.spend, m.purchases), cur)}${delta(cost(m.spend, m.purchases), prev ? cost(prev.spend, prev.purchases) : undefined)}`);
+  if (m.conversions > 0) {
+    const label = kind === "leads" ? "leads (formulaires, pas des achats)" : "autres conversions (événement suivi par le compte, pas des achats)";
+    parts.push(`${label} ${num(m.conversions)}${delta(m.conversions, prev?.conversions)}`, `coût par ${kind === "leads" ? "lead" : "conversion"} ${money(m.cpa, cur)}${delta(m.cpa, prev?.cpa)}`);
+  }
+  return parts;
+}
+
+/** One line of account totals for a period. `purchaseWord`: how the platform's conversions are called when they are its main event. */
+export function totalsLine(m: Metrics, prev: Metrics | null, cur: string | null, purchaseWord = "conversions"): string {
+  const f = (k: "ctr" | "ctrAll" | "cpm" | "hookRate") => fmtMetric(k, m[k], cur, m);
+  const parts = [`dépense ${money(m.spend, cur)}${delta(m.spend, prev?.spend)}`, `impressions ${num(m.impressions)}${delta(m.impressions, prev?.impressions)}`];
+  // Two CTRs on Meta (link clicks vs every click): both, named, or the client's own report never matches.
+  if (m.clicks > 0 && m.linkClicks > 0 && Math.abs(m.clicks - m.linkClicks) > m.clicks * 0.02) parts.push(`clics sur le lien ${num(m.linkClicks)}`, `CTR lien ${f("ctr")}`, `tous les clics ${num(m.clicks)}`, `CTR tous clics ${f("ctrAll")}`);
+  else parts.push(...(m.clicks > 0 ? [`clics ${num(m.clicks)}${delta(m.clicks, prev?.clicks)}`] : []), `CTR ${f("ctr")}`);
+  parts.push(`CPM ${f("cpm")}`, ...conversionParts(m, prev, cur, purchaseWord));
+  if (!m.roasUnavailable && m.conversionValue > 0) parts.push(`${conversionKind(m) === "purchases" ? "valeur" : "valeur des achats"} ${money(m.conversionValue, cur)}${delta(m.conversionValue, prev?.conversionValue)}`, `ROAS ${m.roas.toLocaleString("fr-FR", { maximumFractionDigits: 2 })}${m.estimated ? " (estimé)" : ""}${delta(m.roas, prev?.roas)}`);
   if (m.videoPlays > 0 && m.hookRate > 0) parts.push(`hook rate ${f("hookRate")}`);
   return parts.join(" · ");
+}
+
+/** Account totals of a period from the live daily rows, shaped like the warehouse's (only what totalsLine reads). */
+export function googleTotals(days: GoogleAccountDay[], range: { since: string; until: string }, base: Metrics): Metrics {
+  const s = { spend: 0, impressions: 0, clicks: 0, conversions: 0, value: 0 };
+  for (const d of days) if (d.date >= range.since && d.date <= range.until) { s.spend += d.spend; s.impressions += d.impressions; s.clicks += d.clicks; s.conversions += d.conversions; s.value += d.conversionValue; }
+  const r2 = (v: number) => Math.round(v * 100) / 100;
+  const div = (a: number, b: number) => (b > 0 ? r2(a / b) : 0);
+  return {
+    ...base, spend: r2(s.spend), impressions: s.impressions, clicks: s.clicks, linkClicks: s.clicks,
+    ctr: div(s.clicks * 100, s.impressions), ctrAll: div(s.clicks * 100, s.impressions), cpc: div(s.spend, s.clicks), cpm: div(s.spend * 1000, s.impressions),
+    conversions: r2(s.conversions), purchases: r2(s.conversions), leads: 0, cpa: div(s.spend, s.conversions), conversionValue: r2(s.value), roas: div(s.value, s.spend),
+    estimated: false, roasUnavailable: s.value <= 0, videoPlays: 0, hookRate: 0,
+  };
 }
 
 export function imageUrl(botId: string, platform: string, adId: string, kind: "image" | "video" = "image"): string {
@@ -92,7 +140,7 @@ function creativeLine(botId: string, r: AdsGroupRow, i: number, cur: string | nu
   const m = r.metrics;
   const tags = SHOWN_TAGS.map((k) => (a.tags[k] ? `${GLOSSARY_LABELS[k].split(" ")[0]} ${a.tags[k]}` : "")).filter(Boolean).join(" ; ");
   const kpis = [`dépense ${money(m.spend, cur)}`, `CTR ${fmtMetric("ctr", m.ctr, cur, m)}`];
-  if (m.conversions > 0) kpis.push(`conversions ${num(m.conversions)}`, `CPA ${money(m.cpa, cur)}`);
+  kpis.push(...conversionParts(m, null, cur, "conversions").map((p) => p.replace(/ \((formulaires|événement)[^)]*\)/, "")));
   if (!m.roasUnavailable && m.conversionValue > 0) kpis.push(`ROAS ${m.roas.toLocaleString("fr-FR", { maximumFractionDigits: 2 })}`);
   if (m.videoPlays > 0 && m.hookRate > 0) kpis.push(`hook ${fmtMetric("hookRate", m.hookRate, cur, m)}`);
   if (m.convertScore > 0) kpis.push(`score conversion ${Math.round(m.convertScore)}/100`);
@@ -124,6 +172,10 @@ async function platformBlock(botId: string, platform: WarehousePlatform, account
   const base: Omit<AdsQuery, "range" | "compare"> = { platforms: [platform], accountIds, accounts: accountIds.map((id) => ({ platform, id })), groupBy: "creative", filters: {}, sort: { key: "spend", dir: "desc" } };
   const w30 = window(30, now), w7 = window(7, now);
   const since14 = iso(new Date(now.getTime() - 14 * 86400_000));
+  // Google: the account's real totals are read live (the warehouse is ad-level, Performance Max has no ads).
+  const liveGoogle = platform === "google" && accountIds.length === 1
+    ? googleAccountDaily(accountIds[0], w30.compare.since, w30.range.until).catch(() => null)
+    : Promise.resolve(null);
   const [r30, r7, lastDay, rNew] = await Promise.all([
     queryAds({ ...base, ...w30, limit: 40 }),
     queryAds({ ...base, ...w7, limit: 3 }),
@@ -132,8 +184,10 @@ async function platformBlock(botId: string, platform: WarehousePlatform, account
     // are far below the month's top 40): « les nouvelles créas » is answered here, with visuals.
     queryAds({ ...base, range: w30.range, filters: { launchedAfter: since14 }, sort: { key: "launch", dir: "desc" }, limit: RECENT_MAX }).catch(() => null),
   ]) as [AdsQueryResult, AdsQueryResult, string | null, AdsQueryResult | null];
+  const gDays = await liveGoogle;
+  const live = !!gDays?.length;
   // Nothing in the warehouse: say so, so the model fetches live instead of answering « no data ».
-  if (r30.benchmark.spend <= 0 && r7.benchmark.spend <= 0) {
+  if (r30.benchmark.spend <= 0 && r7.benchmark.spend <= 0 && !live) {
     return `### ${PLATFORM_LABEL[platform]}\n${liveNote(platform, "aucune donnée dans l'entrepôt de l'agence pour ce compte (pas encore synchronisé, ou pas de dépense récente)")}`;
   }
   // Behind: the last days of the windows are missing or partial.
@@ -141,6 +195,23 @@ async function platformBlock(botId: string, platform: WarehousePlatform, account
   if (!lastDay || lastDay < w7.range.until) gaps.push(lastDay ? `l'entrepôt n'est à jour que jusqu'au ${frDate(lastDay)} (les chiffres ci-dessous sont incomplets)` : "synchronisation de l'entrepôt inachevée (chiffres possiblement incomplets)");
   if (r7.benchmark.spend > 0 && r7.benchmark.impressions <= 0) gaps.push("impressions absentes de l'entrepôt sur 7 jours");
   const cur = r30.currency;
+  // Totals shown for the account: live for Google (whole account), the warehouse otherwise.
+  const t7 = live ? googleTotals(gDays!, w7.range, r7.benchmark) : r7.benchmark;
+  const p7 = live ? googleTotals(gDays!, w7.compare, r7.benchmark) : r7.benchmarkPrevious;
+  const t30 = live ? googleTotals(gDays!, w30.range, r30.benchmark) : r30.benchmark;
+  const p30 = live ? googleTotals(gDays!, w30.compare, r30.benchmark) : r30.benchmarkPrevious;
+  const word = platform === "tiktok" ? "conversions (événement d'optimisation des campagnes)" : "conversions";
+  const scope: string[] = [];
+  if (platform === "google") {
+    if (live) {
+      const off = (total: number, ads: number) => (total - ads > Math.max(1, total * 0.02) ? total - ads : 0);
+      const o7 = off(t7.spend, r7.benchmark.spend), o30 = off(t30.spend, r30.benchmark.spend);
+      scope.push("Totaux ci-dessous = le COMPTE ENTIER, toutes campagnes (Recherche, Performance Max, Display, Vidéo…), lus en direct sur Google Ads : ce sont eux qu'on donne pour « Google Ads ».");
+      if (o7 > 0 || o30 > 0) scope.push(`Dont campagnes sans annonces (Performance Max) : ${money(o7, cur)} sur 7 jours, ${money(o30, cur)} sur 30 jours. Les créas listées plus bas ne couvrent que les annonces (hors Performance Max) : leur somme est donc inférieure au total, c'est normal.`);
+    } else {
+      gaps.push("les totaux ci-dessous ne comptent QUE les annonces (Recherche, Display, Vidéo) et PAS Performance Max : ce n'est pas le total du compte, ne les présente jamais comme « Google Ads » ; lis le total du compte (toutes campagnes) et celui de la période d'avant");
+    }
+  }
   const all30 = r30.rows.filter((r) => r.sample && r.metrics.spend > 0);
   const rows30 = all30.slice(0, 6);
   // Launched in the last 14 days (« les nouvelles créas », « S44-S45 »): with their visual, by spend.
@@ -170,8 +241,9 @@ async function platformBlock(botId: string, platform: WarehousePlatform, account
   return [
     `### ${PLATFORM_LABEL[platform]}`,
     gaps.length ? liveNote(platform, gaps.join(" ; ")) : "",
-    `7 derniers jours (${frDate(w7.range.since)} → ${frDate(w7.range.until)}, écarts vs les 7 jours d'avant) : ${totalsLine(r7.benchmark, r7.benchmarkPrevious, cur)}`,
-    `30 derniers jours (${frDate(w30.range.since)} → ${frDate(w30.range.until)}, écarts vs les 30 jours d'avant) : ${totalsLine(r30.benchmark, r30.benchmarkPrevious, cur)}`,
+    ...scope,
+    `7 derniers jours (${frDate(w7.range.since)} → ${frDate(w7.range.until)}, écarts vs les 7 jours d'avant, ${frDate(w7.compare.since)} → ${frDate(w7.compare.until)}) : ${totalsLine(t7, p7, cur, word)}`,
+    `30 derniers jours (${frDate(w30.range.since)} → ${frDate(w30.range.until)}, écarts vs les 30 jours d'avant, ${frDate(w30.compare.since)} → ${frDate(w30.compare.until)}) : ${totalsLine(t30, p30, cur, word)}`,
     rows7.length ? `Créas qui dépensent le plus sur 7 jours :\n${rows7.map((r, i) => creativeLine(botId, r, i + 1, cur)).join("\n")}` : "",
     rows30.length ? `Créas qui dépensent le plus sur 30 jours :\n${rows30.map((r, i) => creativeLine(botId, r, i + 1, cur)).join("\n")}` : "",
     recent.length ? `Créas lancées ces 14 derniers jours (depuis le ${frDate(since14)}, les plus récentes d'abord, hors celles ci-dessus ; chiffres depuis leur lancement) :\n${recent.map((r, i) => creativeLine(botId, r, i + 1, cur, true)).join("\n")}` : "",
@@ -204,6 +276,7 @@ export async function buildBotAdsPack(botId: string, accounts: BotAdsAccounts, n
     "- Publicité dynamique du catalogue (DPA, texte avec {{product.…}}) trouvée en direct : elle n'a pas de visuel fixe ; montre 3 produits de son catalogue en ajoutant &product=0, &product=1 et &product=2 à l'adresse image, présentés comme des exemples de produits diffusés.",
     "- Toutes les créas des comptes de ce client, même lancées hier, ont leur visuel côté serveur : ne dis JAMAIS qu'une créa n'est « pas indexée » ou que son visuel est indisponible, écris l'adresse du visuel ; si l'image ne se charge pas, le chat l'indique lui-même.",
     "- « Meilleures créas », « celles qui marchent le mieux », « les plus rentables » : sur 30 jours, utilise DIRECTEMENT les classements « Meilleures créas … au ROAS » (e-commerce) ou « … au coût par conversion » (sans ROAS), sans appeler d'outil. Les créas « qui dépensent le plus » ne sont pas les meilleures. N'appelle un outil que pour une autre période ou plus de 6 créas.",
+    "- Reprends les indicateurs avec leur LIBELLÉ EXACT de ce bloc : « achats » n'est pas « leads » ni « conversions ». N'écris jamais « conversions » pour des leads, ne mets jamais un coût par lead à côté de la valeur des achats sans nommer les deux, et précise « CTR lien » ou « CTR tous clics ». Les écarts « vs période précédente » sont ceux écrits entre parenthèses ici, calculés sur la période d'avant indiquée : ne les recalcule pas autrement. Les conversions des tout derniers jours peuvent encore monter (attribution différée) : dis-le si le client compare avec son propre tableau de bord.",
     "- Désigne les créas par leur nom lisible (celui entre guillemets ici, ex. « Trek · Cap-Vert · Solo »), dans le texte comme dans les tableaux : jamais par le nom technique de l'annonce (W45Y26_SGL_IMG_…) ni par un identifiant. Pour une créa trouvée en direct, résume de même son nom d'annonce en quelques mots lisibles. Chaque plateforme a sa propre attribution : ne les additionne jamais.",
     ...blocks,
   ].join("\n") : "";

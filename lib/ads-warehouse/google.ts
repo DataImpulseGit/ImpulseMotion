@@ -268,3 +268,23 @@ export const googleAdapter: WarehouseAdapter = {
     return { daily: Array.from(daily.values()), catalog, truncated, currency };
   },
 };
+
+export interface GoogleAccountDay { date: string; spend: number; impressions: number; clicks: number; conversions: number; conversionValue: number }
+
+/**
+ * Daily totals of the WHOLE account (every campaign type, Performance Max
+ * included), read live. The warehouse is ad-level, and Performance Max has no
+ * ads: a total summed from the warehouse silently leaves that spend out.
+ */
+export async function googleAccountDaily(customerId: string, since: string, until: string, timeoutMs = 20_000): Promise<GoogleAccountDay[]> {
+  const query = `SELECT segments.date, metrics.cost_micros, metrics.impressions, metrics.clicks, metrics.conversions, metrics.conversions_value FROM customer WHERE segments.date BETWEEN '${since}' AND '${until}'`;
+  const raw = await relayDirectTool("mcp-google-ads.Custom_GAQL_Query", { input: JSON.stringify({ customer_id: customerId, gaql_query: query }) }, timeoutMs);
+  const out: GoogleAccountDay[] = [];
+  for (const r of extractRows(raw)) {
+    const date = str(obj(r.segments).date);
+    if (!date) continue;
+    const m = obj(r.metrics);
+    out.push({ date, spend: num(m.costMicros) / 1e6, impressions: int(m.impressions), clicks: int(m.clicks), conversions: num(m.conversions), conversionValue: num(m.conversionsValue) });
+  }
+  return out;
+}
