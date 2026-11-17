@@ -5,11 +5,14 @@
  *   POST → { conversation: { id, title, updatedAt } } (new, empty)
  */
 
-import { NextRequest, NextResponse } from "next/server";
+import { after, NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireSession } from "@/lib/auth-helpers";
 import { loadBotFor } from "@/lib/bot-access";
 import { runningConversationIds } from "@/lib/ai-jobs";
+import { parseSources } from "@/lib/bot-types";
+import { warmBotAdsPack } from "@/lib/bot-ads-pack";
+import { getDashboardTikTokIds } from "@/lib/tiktok-accounts";
 
 const MAX_CONVERSATIONS = 100;
 const MAX_LIST = 50;
@@ -28,6 +31,16 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ bot
   const { botId } = await params;
   const g = await guardBot(botId);
   if ("error" in g) return g.error;
+  // The page is opening: the figures of the bot's accounts are read on the platforms now,
+  // behind this answer, so the first question finds them ready (no wait in the chat).
+  const bot = g.bot;
+  after(async () => {
+    try {
+      const sources = parseSources(bot.sourcesJson);
+      const tiktok = sources.tiktok ? await getDashboardTikTokIds(bot.dashboard.id) : [];
+      await warmBotAdsPack(bot.id, { meta: sources.meta ? bot.dashboard.metaAccountId : null, google: sources.google ? bot.dashboard.googleCustomerId : null, tiktok });
+    } catch { /* best effort */ }
+  });
   const rows = await prisma.botConversation.findMany({
     where: { botId, userId: g.session.userId },
     select: { id: true, title: true, updatedAt: true },

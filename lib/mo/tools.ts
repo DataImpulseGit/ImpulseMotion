@@ -26,7 +26,8 @@ import { listClientRegistry, type ClientRef } from "@/lib/clients/registry";
 import { matchClientName, withClientAliases } from "@/lib/mo/intents";
 import { brandBriefFromHq } from "@/lib/mo/brief";
 import { isHqContextFresh } from "@/lib/hq-client-context";
-import { deriveMetrics, queryAds, type Metrics, type MetricKey } from "@/lib/ads-warehouse/query";
+import { deriveMetrics, queryAds, type Metrics, type MetricKey, type Sums } from "@/lib/ads-warehouse/query";
+import { liveAccountDays, sumDays } from "@/lib/account-days";
 import type { WarehousePlatform } from "@/lib/ads-warehouse/types";
 import { checkGeneration, readQuotas, spentToday } from "@/lib/quotas";
 import { IMAGE_RATIOS, isFalModel, publicMediaUrl, relayFalImage, relayImage, mediaUrl } from "@/lib/studio";
@@ -254,6 +255,23 @@ const GROUPS = { campaign: "campaign", adset: "adset", format: "format", platfor
  */
 const GOOGLE_SCOPE = "Google = annonces seulement (Recherche, Display, Vidéo) : Performance Max n'est PAS comptée, ce n'est donc pas le total du compte Google. Dis-le dès que tu cites un total ou une évolution qui inclut Google ; pour le total réel du compte, interroge Google Ads en direct.";
 
+const PLATFORM_NAME: Record<string, string> = { meta: "Meta", google: "Google", tiktok: "TikTok" };
+
+/** What the account did outside the ads known to the warehouse: live total − sum of the ads (may be slightly negative on a late conversion). */
+function liveMinusAds(live: Sums, ads: Metrics | null) {
+  const a = ads ?? ({ spend: 0, impressions: 0, clicks: 0, linkClicks: 0, conversions: 0, conversionValue: 0, purchases: 0 } as Metrics);
+  return { spend: live.spend - a.spend, impressions: live.impressions - a.impressions, clicks: live.clicks - a.clicks, linkClicks: live.linkClicks - a.linkClicks, conversions: live.conversions - a.conversions, conversionValue: live.conversionValue - a.conversionValue, purchases: live.purchases - a.purchases };
+}
+
+/** Totals with that extra added, ratios recomputed. */
+function withExtra(m: Metrics, e: ReturnType<typeof liveMinusAds>): Metrics {
+  const r2 = (v: number) => Math.round(v * 100) / 100;
+  const div = (a: number, b: number) => (b > 0 ? r2(a / b) : 0);
+  const spend = Math.max(0, m.spend + e.spend), impressions = Math.max(0, m.impressions + e.impressions), clicks = Math.max(0, m.clicks + e.clicks), linkClicks = Math.max(0, m.linkClicks + e.linkClicks);
+  const conversions = Math.max(0, m.conversions + e.conversions), conversionValue = Math.max(0, m.conversionValue + e.conversionValue), purchases = Math.max(0, m.purchases + e.purchases);
+  return { ...m, spend: r2(spend), impressions, clicks, linkClicks, conversions: r2(conversions), conversionValue: r2(conversionValue), purchases: r2(purchases), ctr: div(linkClicks * 100, impressions), ctrAll: div(clicks * 100, impressions), cpc: div(spend, linkClicks), cpm: div(spend * 1000, impressions), cpa: div(spend, conversions), roas: div(conversionValue, spend), roasUnavailable: m.roasUnavailable && conversionValue <= 0 };
+}
+
 /** The client's figures over a period, against the previous period of the same length: a KPI card, and a table by campaign / ad set / format when asked. */
 export async function metrics(ctx: MoToolContext, a: Args): Promise<ToolResult> {
   const { client } = await resolveClient(ctx, a.client);
@@ -264,9 +282,42 @@ export async function metrics(ctx: MoToolContext, a: Args): Promise<ToolResult> 
   const compare = a.compare === false ? null : { since: shift(range.since, -days), until: shift(range.since, -1) };
   const byKey = str(a.by, 20) as keyof typeof GROUPS;
   const by = byKey in GROUPS ? byKey : null;
-  const res = await queryAds({ platforms, accountIds, accounts, range: { since: range.since, until: range.until }, compare, groupBy: by && GROUPS[by] ? GROUPS[by]! : "campaign", sort: { key: "spend", dir: "desc" }, limit: by ? 12 : 1 });
+  // Google: the warehouse only knows ads (no Performance Max). The account's real totals are read
+  // live and replace the warehouse's Google part; without an answer, the result says it is partial.
+  const googleIds = accounts.filter((x) => x.platform === "google").map((x) => x.id);
+  const googleLive = googleIds.length
+    ? Promise.all([
+        Promise.all(googleIds.map((id) => liveAccountDays("google", id, { since: compare?.since ?? range.since, until: range.until }, 12_000))).then((l) => l.flat()),
+        queryAds({ platforms: ["google"], accountIds: googleIds, accounts: accounts.filter((x) => x.platform === "google"), range: { since: range.since, until: range.until }, compare, groupBy: "campaign", limit: 1 }),
+      ]).catch((e) => { console.warn("[mo/tools] Google en direct :", e instanceof Error ? e.message : e); return null; })
+    : Promise.resolve(null);
+  const [res, gLive] = await Promise.all([
+    queryAds({ platforms, accountIds, accounts, range: { since: range.since, until: range.until }, compare, groupBy: by && GROUPS[by] ? GROUPS[by]! : "campaign", sort: { key: "spend", dir: "desc" }, limit: by ? 12 : 1 }),
+    googleLive,
+  ]);
   const cur = res.currency;
-  const m = res.benchmark, p = res.benchmarkPrevious;
+  const googlePartial = googleIds.length > 0 && !gLive;
+  // Several platforms: each one measures its own conversions (two may claim the same sale, TikTok counts its
+  // optimisation event). Their conversions, costs and ROAS are never summed: one line per platform instead.
+  const multi = platforms.length > 1;
+  const perPlatform = multi ? await Promise.all(platforms.map(async (pl) => {
+    const own = accounts.filter((x) => x.platform === pl);
+    const r = await queryAds({ platforms: [pl], accountIds: own.map((x) => x.id), accounts: own, range: { since: range.since, until: range.until }, compare, groupBy: "campaign", limit: 1 });
+    let cm = r.benchmark, pm = r.benchmarkPrevious;
+    if (pl === "google" && gLive) {
+      cm = withExtra(cm, liveMinusAds(sumDays(gLive[0], { since: range.since, until: range.until }), gLive[1].benchmark));
+      if (compare && pm) pm = withExtra(pm, liveMinusAds(sumDays(gLive[0], compare), gLive[1].benchmarkPrevious));
+    }
+    return { platform: pl, m: cm, p: pm };
+  })) : [];
+  let m = res.benchmark, p = res.benchmarkPrevious;
+  let offAds: ReturnType<typeof liveMinusAds> | null = null;
+  if (gLive) {
+    const [days, wh] = gLive;
+    offAds = liveMinusAds(sumDays(days, { since: range.since, until: range.until }), wh.benchmark);
+    m = withExtra(m, offAds);
+    if (compare && p) p = withExtra(p, liveMinusAds(sumDays(days, compare), wh.benchmarkPrevious));
+  }
   const delta = (now: number, before: number | undefined, lowerIsBetter = false) => {
     if (!before || !now) return {};
     const d = Math.round(((now - before) / before) * 100);
@@ -274,20 +325,57 @@ export async function metrics(ctx: MoToolContext, a: Args): Promise<ToolResult> 
     const good = lowerIsBetter ? d < 0 : d > 0;
     return { delta: `${d > 0 ? "+" : ""}${d} % vs période préc.`, tone: good ? "good" as const : "bad" as const };
   };
-  const main: Array<{ label: string; value: string; delta?: string; tone?: "good" | "bad" | "neutral" }> = [{ label: "Dépense", value: money(m.spend, cur), ...delta(m.spend, p?.spend) }];
+  const main: Array<{ label: string; value: string; delta?: string; tone?: "good" | "bad" | "neutral" }> = [{ label: multi ? "Dépense totale" : "Dépense", value: money(m.spend, cur), ...delta(m.spend, p?.spend) }];
+  const near = (a: number, b: number) => Math.abs(a - b) < 0.5;
+  if (multi) {
+    // Only what adds up across platforms; the rest is in the table by platform.
+    if (m.impressions) main.push({ label: "Impressions", value: int(m.impressions), ...delta(m.impressions, p?.impressions) });
+    for (const q of perPlatform) main.push({ label: `Dépense ${PLATFORM_NAME[q.platform] ?? q.platform}`, value: money(q.m.spend, cur), ...delta(q.m.spend, q.p?.spend) });
+  } else {
   if (m.leads) main.push({ label: "Leads", value: int(m.leads), ...delta(m.leads, p?.leads) }, { label: "CPL", value: money(m.spend / m.leads, cur), ...delta(m.spend / m.leads, p?.leads ? p.spend / p.leads : undefined, true) });
-  if (m.conversions) main.push({ label: m.purchases ? "Achats" : "Conversions", value: int(m.conversions), ...delta(m.conversions, p?.conversions) }, { label: "CPA", value: m.cpa ? money(m.cpa, cur) : "—", ...delta(m.cpa, p?.cpa, true) });
+  // Each event under its own name: on an account that converts in leads, « conversions » ARE the leads —
+  // shown as « Achats », they made 136 purchases out of 24 (Decathlon Travel, 16/11/2026).
+  if (m.purchases) main.push({ label: platforms[0] === "meta" ? "Achats" : "Conversions", value: int(m.purchases), ...delta(m.purchases, p?.purchases) }, { label: platforms[0] === "meta" ? "Coût par achat" : "CPA", value: money(m.spend / m.purchases, cur), ...delta(m.spend / m.purchases, p?.purchases ? p.spend / p.purchases : undefined, true) });
+  if (m.conversions && !near(m.conversions, m.purchases) && !near(m.conversions, m.leads)) main.push({ label: "Conversions", value: int(m.conversions), ...delta(m.conversions, p?.conversions) }, { label: "CPA", value: m.cpa ? money(m.cpa, cur) : "—", ...delta(m.cpa, p?.cpa, true) });
   if (m.roas && !m.roasUnavailable) main.push({ label: "ROAS", value: `${x(m.roas)}${m.estimated ? " (est.)" : ""}`, ...delta(m.roas, p?.roas) });
   if (m.ctr) main.push({ label: "CTR", value: pct(m.ctr), ...delta(m.ctr, p?.ctr) });
   if (m.cpm) main.push({ label: "CPM", value: money(m.cpm, cur), ...delta(m.cpm, p?.cpm, true) });
   if (m.impressions) main.push({ label: "Impressions", value: int(m.impressions), ...delta(m.impressions, p?.impressions) });
+  }
   const platformLabel = platforms.map((q) => q === "meta" ? "Meta" : q === "google" ? "Google" : q === "tiktok" ? "TikTok" : q).join(" + ");
-  const subtitle = `${platformLabel}${platforms.includes("google") ? " (hors Performance Max)" : ""} · ${client.name} · ${range.since} → ${range.until}${compare ? ` · vs ${compare.since} → ${compare.until}` : ""}`;
+  const subtitle = `${platformLabel}${googlePartial ? " (Google hors Performance Max)" : ""} · ${client.name} · ${range.since} → ${range.until}${compare ? ` · vs ${compare.since} → ${compare.until}` : ""}`;
   const cards: MoCardSpec[] = [{ type: "kpis", clientId: client.id, clientName: client.name, title: str(a.title, 90) || `${client.name} — ${range.label}`, subtitle, items: main.slice(0, 8) }];
+  // One line per platform, each with its own events and its own change vs the previous period.
+  const pctDelta = (now: number, before: number | undefined) => { if (!before || !now) return ""; const d = Math.round(((now - before) / before) * 100); return d === 0 ? " (=)" : ` (${d > 0 ? "+" : ""}${d} %)`; };
+  const byPlatform = perPlatform.map((q) => {
+    const a = q.m, b = q.p;
+    const leadsMode = a.leads > 0 && near(a.conversions, a.leads) && !near(a.leads, a.purchases);
+    const count = q.platform === "tiktok" ? a.conversions : a.purchases || (leadsMode ? 0 : a.conversions);
+    const mainBefore = b ? (q.platform === "tiktok" ? b.conversions : b.purchases || (leadsMode ? 0 : b.conversions)) : undefined;
+    const word = q.platform === "tiktok" ? "conv. (optimisation)" : q.platform === "meta" && a.purchases ? "achats" : "conv.";
+    return {
+      Plateforme: PLATFORM_NAME[q.platform] ?? q.platform,
+      Dépense: `${money(a.spend, cur)}${pctDelta(a.spend, b?.spend)}`,
+      Conversions: count ? `${int(count)} ${word}${pctDelta(count, mainBefore)}` : "—",
+      "Coût / conv.": count ? `${money(a.spend / count, cur)}${pctDelta(a.spend / count, mainBefore && b ? b.spend / mainBefore : undefined)}` : "—",
+      Leads: a.leads ? `${int(a.leads)}${pctDelta(a.leads, b?.leads)} · ${money(a.spend / a.leads, cur)}` : "—",
+      ROAS: a.roas && !a.roasUnavailable && q.platform !== "tiktok" ? `${x(a.roas)}${pctDelta(a.roas, b?.roas)}` : "—",
+      CTR: a.ctr ? pct(a.ctr) : "—",
+    };
+  });
+  if (byPlatform.length) {
+    const cols = Object.keys(byPlatform[0]);
+    cards.push({ type: "table", clientId: client.id, clientName: client.name, title: `Par plateforme — ${client.name}`, subtitle, columns: cols, rows: byPlatform.map((r) => cols.map((c) => (r as Record<string, string>)[c] ?? "")), align: ["left", ...cols.slice(1).map(() => "right" as const)] });
+  }
   let rows: Array<Record<string, string>> = [];
   if (by && res.rows.length) {
     const cols = ["Dépense", m.leads ? "Leads" : "Conv.", m.leads ? "CPL" : "CPA", "CTR", ...(m.roas && !m.roasUnavailable ? ["ROAS"] : [])];
     rows = res.rows.map((r) => ({ [by === "campaign" ? "Campagne" : by === "adset" ? "Ensemble" : "Format"]: r.label.slice(0, 60), Dépense: money(r.metrics.spend, cur), [m.leads ? "Leads" : "Conv."]: int(m.leads ? r.metrics.leads : r.metrics.conversions), [m.leads ? "CPL" : "CPA"]: m.leads ? (r.metrics.leads ? money(r.metrics.spend / r.metrics.leads, cur) : "—") : (r.metrics.cpa ? money(r.metrics.cpa, cur) : "—"), CTR: r.metrics.ctr ? pct(r.metrics.ctr) : "—", ...(m.roas && !m.roasUnavailable ? { ROAS: r.metrics.roas ? x(r.metrics.roas) : "—" } : {}) }));
+    // What Google spent outside any ad (Performance Max): its own line, or the table would not add up to the total.
+    if (offAds && offAds.spend > Math.max(1, m.spend * 0.01)) {
+      const conv = offAds.conversions;
+      rows.push({ [Object.keys(rows[0])[0]]: "Google — Performance Max (campagnes sans annonces)", Dépense: money(offAds.spend, cur), [m.leads ? "Leads" : "Conv."]: m.leads ? "—" : int(conv), [m.leads ? "CPL" : "CPA"]: !m.leads && conv > 0 ? money(offAds.spend / conv, cur) : "—", CTR: offAds.impressions > 0 ? pct((offAds.clicks / offAds.impressions) * 100) : "—", ...(m.roas && !m.roasUnavailable ? { ROAS: offAds.spend > 0 && offAds.conversionValue > 0 ? x(offAds.conversionValue / offAds.spend) : "—" } : {}) });
+    }
     const first = Object.keys(rows[0])[0];
     cards.push({ type: "table", clientId: client.id, clientName: client.name, title: `Par ${by === "campaign" ? "campagne" : by === "adset" ? "ensemble" : "format"} — ${client.name}`, subtitle, columns: [first, ...cols], rows: rows.map((r) => [r[first], ...cols.map((c) => r[c] ?? "")]), align: ["left", ...cols.map(() => "right" as const)] });
   }
@@ -297,7 +385,8 @@ export async function metrics(ctx: MoToolContext, a: Args): Promise<ToolResult> 
     ...(posted.length ? { posted_cards: posted, posted: "Les cartes sont DÉJÀ sur le tableau : ne les recopie pas, dis juste la phrase (la conclusion, un ou deux chiffres)." } : {}),
     ...(a.post === false ? { card_specs: cards } : {}),
     totals: Object.fromEntries(main.map((k) => [k.label, `${k.value}${k.delta ? ` (${k.delta})` : ""}`])),
-    ...(platforms.includes("google") ? { google_scope: GOOGLE_SCOPE } : {}),
+    ...(byPlatform.length ? { by_platform: byPlatform, platforms_note: "Chaque plateforme a sa propre attribution : donne les conversions, coûts et ROAS PAR plateforme (by_platform), ne les additionne jamais ; seules la dépense et les impressions s'additionnent." } : {}),
+    ...(googlePartial ? { google_scope: GOOGLE_SCOPE } : googleIds.length ? { google_scope: "Google = total du compte entier lu en direct sur Google Ads (Performance Max comprise)." } : {}),
     ...(rows.length ? { rows } : {}), data_until: res.coverage.until,
     coverage: res.coverage.complete ? "complète" : res.coverage.errors ? `données jusqu'au ${res.coverage.until ?? "?"} (dernière synchronisation en échec)` : res.coverage.loading ? "synchronisation en cours" : "partielle",
   };

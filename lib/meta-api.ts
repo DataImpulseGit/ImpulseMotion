@@ -971,6 +971,23 @@ export async function getAdDailyInsightsRichPaged(
   }, opts.max ?? 20000);
 }
 
+/** The same daily fields at ACCOUNT level (one row per day): the account's real totals, whatever the campaign type. */
+export async function getAccountDailyInsightsRich(
+  accessToken: string,
+  adAccountId: string,
+  timeRange: { since: string; until: string },
+): Promise<MetaCreativeInsightRich[]> {
+  const res = await metaFetchAll<MetaCreativeInsightRich>(`/${actId(adAccountId)}/insights`, accessToken, {
+    ...INSIGHTS_COMMON,
+    fields: AD_DAILY_RICH_FIELDS.split(",").filter((f) => !/^(ad|adset|campaign)_/.test(f)).join(","),
+    level: "account",
+    time_increment: "1",
+    limit: "500",
+    time_range: JSON.stringify(timeRange),
+  }, 1000);
+  return res.data;
+}
+
 /** Daily ad-level rows for a period in ONE paged call (replaces the per-ad N+1). */
 export async function getAdDailyInsightsBatch(
   accessToken: string,

@@ -12,13 +12,13 @@
  * the bot again. Cached 15 min per bot (one warm instance).
  */
 
-import { queryAds, type AdsGroupRow, type AdsQuery, type AdsQueryResult, type Metrics } from "@/lib/ads-warehouse/query";
+import { deriveMetrics, queryAds, type AdsGroupRow, type AdsQuery, type AdsQueryResult, type Metrics } from "@/lib/ads-warehouse/query";
 import { stateId, type WarehousePlatform } from "@/lib/ads-warehouse/types";
 import { prisma } from "@/lib/prisma";
 import { GLOSSARY_LABELS, type GlossaryKey } from "@/lib/ads-warehouse/glossary-labels";
 import { fmtMetric } from "@/lib/ads-warehouse/metrics-ui";
 import { readableAdName } from "@/lib/ad-readable-name";
-import { googleAccountDaily, type GoogleAccountDay } from "@/lib/ads-warehouse/google";
+import { calendarPeriods, daysSince, liveAccountDays, sumDays, ZERO_SUMS, type DaySums, type DayRange } from "@/lib/account-days";
 
 export interface BotAdsAccounts { meta?: string | null; google?: string | null; tiktok?: string[] }
 
@@ -111,18 +111,15 @@ export function totalsLine(m: Metrics, prev: Metrics | null, cur: string | null,
   return parts.join(" · ");
 }
 
-/** Account totals of a period from the live daily rows, shaped like the warehouse's (only what totalsLine reads). */
-export function googleTotals(days: GoogleAccountDay[], range: { since: string; until: string }, base: Metrics): Metrics {
-  const s = { spend: 0, impressions: 0, clicks: 0, conversions: 0, value: 0 };
-  for (const d of days) if (d.date >= range.since && d.date <= range.until) { s.spend += d.spend; s.impressions += d.impressions; s.clicks += d.clicks; s.conversions += d.conversions; s.value += d.conversionValue; }
-  const r2 = (v: number) => Math.round(v * 100) / 100;
-  const div = (a: number, b: number) => (b > 0 ? r2(a / b) : 0);
-  return {
-    ...base, spend: r2(s.spend), impressions: s.impressions, clicks: s.clicks, linkClicks: s.clicks,
-    ctr: div(s.clicks * 100, s.impressions), ctrAll: div(s.clicks * 100, s.impressions), cpc: div(s.spend, s.clicks), cpm: div(s.spend * 1000, s.impressions),
-    conversions: r2(s.conversions), purchases: r2(s.conversions), leads: 0, cpa: div(s.spend, s.conversions), conversionValue: r2(s.value), roas: div(s.value, s.spend),
-    estimated: false, roasUnavailable: s.value <= 0, videoPlays: 0, hookRate: 0,
-  };
+/** Days of several accounts of one platform merged into one series (TikTok: several advertisers). */
+function mergeDays(lists: DaySums[][]): DaySums[] {
+  const by = new Map<string, DaySums>();
+  for (const d of lists.flat()) {
+    const cur = by.get(d.date) ?? { ...ZERO_SUMS, date: d.date };
+    for (const k of Object.keys(ZERO_SUMS) as Array<keyof typeof ZERO_SUMS>) cur[k] += d[k];
+    by.set(d.date, cur);
+  }
+  return Array.from(by.values());
 }
 
 export function imageUrl(botId: string, platform: string, adId: string, kind: "image" | "video" = "image"): string {
@@ -168,14 +165,15 @@ function creativeLine(botId: string, r: AdsGroupRow, i: number, cur: string | nu
   ].filter(Boolean).join("\n");
 }
 
-async function platformBlock(botId: string, platform: WarehousePlatform, accountIds: string[], now: Date): Promise<string> {
+async function platformBlock(botId: string, platform: WarehousePlatform, accountIds: string[], now: Date, liveTimeoutMs: number, missed: WarehousePlatform[]): Promise<string> {
   const base: Omit<AdsQuery, "range" | "compare"> = { platforms: [platform], accountIds, accounts: accountIds.map((id) => ({ platform, id })), groupBy: "creative", filters: {}, sort: { key: "spend", dir: "desc" } };
   const w30 = window(30, now), w7 = window(7, now);
   const since14 = iso(new Date(now.getTime() - 14 * 86400_000));
-  // Google: the account's real totals are read live (the warehouse is ad-level, Performance Max has no ads).
-  const liveGoogle = platform === "google" && accountIds.length === 1
-    ? googleAccountDaily(accountIds[0], w30.compare.since, w30.range.until).catch(() => null)
-    : Promise.resolve(null);
+  // Account totals are read LIVE on the platform (a row per day, shared cache): the warehouse
+  // only knows ads, so its sum is not the account's (Performance Max). It stays the fallback.
+  const yesterday = w7.range.until;
+  const liveDays = Promise.all(accountIds.map((id) => liveAccountDays(platform, id, { since: daysSince(yesterday), until: yesterday }, liveTimeoutMs)))
+    .then(mergeDays).catch((e) => { console.warn(`[bot-ads-pack] ${platform} en direct :`, e instanceof Error ? e.message : e); return null; });
   const [r30, r7, lastDay, rNew] = await Promise.all([
     queryAds({ ...base, ...w30, limit: 40 }),
     queryAds({ ...base, ...w7, limit: 3 }),
@@ -184,34 +182,44 @@ async function platformBlock(botId: string, platform: WarehousePlatform, account
     // are far below the month's top 40): « les nouvelles créas » is answered here, with visuals.
     queryAds({ ...base, range: w30.range, filters: { launchedAfter: since14 }, sort: { key: "launch", dir: "desc" }, limit: RECENT_MAX }).catch(() => null),
   ]) as [AdsQueryResult, AdsQueryResult, string | null, AdsQueryResult | null];
-  const gDays = await liveGoogle;
-  const live = !!gDays?.length;
+  const days = await liveDays;
+  const live = !!days?.length;
+  // The platform did not answer in time (≠ answered « nothing »): the pack is to be rebuilt in the background.
+  if (days === null) missed.push(platform);
   // Nothing in the warehouse: say so, so the model fetches live instead of answering « no data ».
   if (r30.benchmark.spend <= 0 && r7.benchmark.spend <= 0 && !live) {
     return `### ${PLATFORM_LABEL[platform]}\n${liveNote(platform, "aucune donnée dans l'entrepôt de l'agence pour ce compte (pas encore synchronisé, ou pas de dépense récente)")}`;
   }
   // Behind: the last days of the windows are missing or partial.
   const gaps: string[] = [];
-  if (!lastDay || lastDay < w7.range.until) gaps.push(lastDay ? `l'entrepôt n'est à jour que jusqu'au ${frDate(lastDay)} (les chiffres ci-dessous sont incomplets)` : "synchronisation de l'entrepôt inachevée (chiffres possiblement incomplets)");
+  // With live totals, a late warehouse only touches the lists of creatives: said plainly, no detour by a tool for the totals.
+  const late = !lastDay || lastDay < w7.range.until;
+  if (late && !live) gaps.push(lastDay ? `l'entrepôt n'est à jour que jusqu'au ${frDate(lastDay)} (les chiffres ci-dessous sont incomplets)` : "synchronisation de l'entrepôt inachevée (chiffres possiblement incomplets)");
   if (r7.benchmark.spend > 0 && r7.benchmark.impressions <= 0) gaps.push("impressions absentes de l'entrepôt sur 7 jours");
   const cur = r30.currency;
-  // Totals shown for the account: live for Google (whole account), the warehouse otherwise.
-  const t7 = live ? googleTotals(gDays!, w7.range, r7.benchmark) : r7.benchmark;
-  const p7 = live ? googleTotals(gDays!, w7.compare, r7.benchmark) : r7.benchmarkPrevious;
-  const t30 = live ? googleTotals(gDays!, w30.range, r30.benchmark) : r30.benchmark;
-  const p30 = live ? googleTotals(gDays!, w30.compare, r30.benchmark) : r30.benchmarkPrevious;
+  // Same value policy as the warehouse: tracked value, else the account's configured basket.
+  const aov = r30.benchmark.estimated && r30.benchmark.aov > 0 ? r30.benchmark.aov : null;
+  const tot = (range: DayRange) => deriveMetrics(sumDays(days ?? [], range), aov);
+  const t7 = live ? tot(w7.range) : r7.benchmark, p7 = live ? tot(w7.compare) : r7.benchmarkPrevious;
+  const t30 = live ? tot(w30.range) : r30.benchmark, p30 = live ? tot(w30.compare) : r30.benchmarkPrevious;
   const word = platform === "tiktok" ? "conversions (événement d'optimisation des campagnes)" : "conversions";
   const scope: string[] = [];
-  if (platform === "google") {
-    if (live) {
-      const off = (total: number, ads: number) => (total - ads > Math.max(1, total * 0.02) ? total - ads : 0);
-      const o7 = off(t7.spend, r7.benchmark.spend), o30 = off(t30.spend, r30.benchmark.spend);
-      scope.push("Totaux ci-dessous = le COMPTE ENTIER, toutes campagnes (Recherche, Performance Max, Display, Vidéo…), lus en direct sur Google Ads : ce sont eux qu'on donne pour « Google Ads ».");
-      if (o7 > 0 || o30 > 0) scope.push(`Dont campagnes sans annonces (Performance Max) : ${money(o7, cur)} sur 7 jours, ${money(o30, cur)} sur 30 jours. Les créas listées plus bas ne couvrent que les annonces (hors Performance Max) : leur somme est donc inférieure au total, c'est normal.`);
-    } else {
-      gaps.push("les totaux ci-dessous ne comptent QUE les annonces (Recherche, Display, Vidéo) et PAS Performance Max : ce n'est pas le total du compte, ne les présente jamais comme « Google Ads » ; lis le total du compte (toutes campagnes) et celui de la période d'avant");
-    }
+  if (live && late) scope.push(`Les créas listées plus bas ne sont à jour que ${lastDay ? `jusqu'au ${frDate(lastDay)}` : "partiellement"} (leurs chiffres peuvent être incomplets) ; les totaux, eux, sont justes.`);
+  if (live) {
+    scope.push(`Totaux du COMPTE ENTIER, toutes campagnes, lus en direct sur ${PLATFORM_LABEL[platform]} : ce sont eux qu'on donne pour « ${PLATFORM_LABEL[platform]} ».`);
+    const off = (total: number, ads: number) => (total - ads > Math.max(1, total * 0.02) ? total - ads : 0);
+    const o7 = off(t7.spend, r7.benchmark.spend), o30 = off(t30.spend, r30.benchmark.spend);
+    if (o7 > 0 || o30 > 0) scope.push(`Dont campagnes sans annonces${platform === "google" ? " (Performance Max)" : ""} : ${money(o7, cur)} sur 7 jours, ${money(o30, cur)} sur 30 jours. Les créas listées plus bas ne couvrent que les annonces : leur somme est inférieure au total, c'est normal.`);
+  } else if (platform === "google") {
+    gaps.push("les totaux ci-dessous ne comptent QUE les annonces (Recherche, Display, Vidéo) et PAS Performance Max : ce n'est pas le total du compte, ne les présente jamais comme « Google Ads » ; lis le total du compte (toutes campagnes) et celui de la période d'avant");
+  } else {
+    gaps.push("la plateforme n'a pas répondu à temps : les totaux ci-dessous viennent de l'entrepôt de l'agence (somme des annonces) ; pour un bilan chiffré, vérifie-les en direct");
   }
+  // Calendar weeks and months, precomputed: « la semaine du 9 au 15 », « octobre » are answered at once, with the right days.
+  const calendar = live ? calendarPeriods(yesterday).map((p) => {
+    const m = tot(p.range);
+    return m.spend > 0 || m.impressions > 0 ? `${p.label}, écarts vs ${p.compareLabel} : ${totalsLine(m, tot(p.compare), cur, word)}` : "";
+  }).filter(Boolean) : [];
   const all30 = r30.rows.filter((r) => r.sample && r.metrics.spend > 0);
   const rows30 = all30.slice(0, 6);
   // Launched in the last 14 days (« les nouvelles créas », « S44-S45 »): with their visual, by spend.
@@ -244,6 +252,7 @@ async function platformBlock(botId: string, platform: WarehousePlatform, account
     ...scope,
     `7 derniers jours (${frDate(w7.range.since)} → ${frDate(w7.range.until)}, écarts vs les 7 jours d'avant, ${frDate(w7.compare.since)} → ${frDate(w7.compare.until)}) : ${totalsLine(t7, p7, cur, word)}`,
     `30 derniers jours (${frDate(w30.range.since)} → ${frDate(w30.range.until)}, écarts vs les 30 jours d'avant, ${frDate(w30.compare.since)} → ${frDate(w30.compare.until)}) : ${totalsLine(t30, p30, cur, word)}`,
+    ...calendar,
     rows7.length ? `Créas qui dépensent le plus sur 7 jours :\n${rows7.map((r, i) => creativeLine(botId, r, i + 1, cur)).join("\n")}` : "",
     rows30.length ? `Créas qui dépensent le plus sur 30 jours :\n${rows30.map((r, i) => creativeLine(botId, r, i + 1, cur)).join("\n")}` : "",
     recent.length ? `Créas lancées ces 14 derniers jours (depuis le ${frDate(since14)}, les plus récentes d'abord, hors celles ci-dessus ; chiffres depuis leur lancement) :\n${recent.map((r, i) => creativeLine(botId, r, i + 1, cur, true)).join("\n")}` : "",
@@ -252,20 +261,11 @@ async function platformBlock(botId: string, platform: WarehousePlatform, account
   ].filter(Boolean).join("\n");
 }
 
-/** The block for the bot's prompt ("" when nothing is in the warehouse for its accounts). */
-export async function buildBotAdsPack(botId: string, accounts: BotAdsAccounts, now = new Date()): Promise<string> {
-  const plan: Array<[WarehousePlatform, string[]]> = [];
-  if (accounts.meta) plan.push(["meta", [accounts.meta.replace(/^act_/, "")]]);
-  if (accounts.google) plan.push(["google", [accounts.google.replace(/-/g, "")]]);
-  if (accounts.tiktok?.length) plan.push(["tiktok", accounts.tiktok]);
-  if (!plan.length) return "";
-  const key = `${botId}|${JSON.stringify(plan)}`;
-  const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < TTL) return hit.text;
-  const blocks = await Promise.all(plan.map(([p, ids]) => platformBlock(botId, p, ids, now).catch(() => `### ${PLATFORM_LABEL[p]}\n${liveNote(p, "entrepôt de l'agence momentanément illisible")}`)));
-  const text = blocks.length ? [
+/** Rules of the block (how the model uses it), before the platform blocks. */
+function packText(botId: string, blocks: string[]): string {
+  return blocks.length ? [
     "CRÉAS ET PERFORMANCES PUBLICITAIRES (déjà calculées pour vous, comptes de ce client uniquement)",
-    "- Ces chiffres viennent de l'entrepôt de l'agence, mis à jour plusieurs fois par jour ; données complètes jusqu'à hier. Pour les 7 ou 30 derniers jours, réponds DIRECTEMENT avec ce bloc, sans appeler d'outil. N'appelle un outil que pour une autre période, un autre niveau (campagne, ensemble), un indicateur absent d'ici, ou une plateforme marquée ⚠ : là, va chercher les chiffres en direct.",
+    "- Les totaux par plateforme sont lus en direct sur les plateformes (compte entier, jours complets jusqu'à hier) ; les créas viennent de l'entrepôt de l'agence. Pour les 7 ou 30 derniers jours, une semaine du lundi au dimanche ou un mois listés ici, réponds DIRECTEMENT avec la ligne de CETTE période, sans appeler d'outil et sans additionner toi-même des lignes. Si la période demandée n'est pas exactement une de ces lignes (autres dates, autre niveau : campagne, ensemble, ou un indicateur absent), ou si la plateforme est marquée ⚠, va chercher les chiffres en direct : ne réponds jamais avec une période approchante.",
     "- LES CLIENTS VEULENT VOIR LEURS CRÉAS, pas seulement des chiffres. Dès qu'une réponse porte sur les performances publicitaires (période, plateforme, campagne, meilleures pubs), termine-la par les cartes des créas qui pèsent le plus sur cette période, même si le client n'a demandé que des chiffres. Pas de limite de nombre : autant de cartes que la question en appelle (toutes celles demandées si le client en veut plus).",
     "- Une carte seulement pour une créa qui a un visuel (une ligne « carte : » ici, ou une vidéo / image d'un outil en direct). Les annonces texte (Google Recherche) et les créas marquées « chiffres : » n'ont pas de visuel : cite-les dans le texte ou dans un tableau, pas en carte.",
     "- Les créas s'affichent en CARTES dans le chat : écris UN bloc de code ```creas puis une ligne par créa, et ferme le bloc. Pour une créa de ce bloc, recopie EXACTEMENT ce qui suit « carte : » (visuel | format · lancement | chiffres). Dans le bloc, chaque ligne commence par « ![ » : n'y recopie JAMAIS le mot « carte : », le numéro, le titre « 1. « … » », le texte ni les tags. N'écris jamais de visuel de créa hors d'un bloc creas, et ne répète pas sous le bloc les chiffres déjà dans les cartes.",
@@ -280,6 +280,93 @@ export async function buildBotAdsPack(botId: string, accounts: BotAdsAccounts, n
     "- Désigne les créas par leur nom lisible (celui entre guillemets ici, ex. « Trek · Cap-Vert · Solo »), dans le texte comme dans les tableaux : jamais par le nom technique de l'annonce (W45Y26_SGL_IMG_…) ni par un identifiant. Pour une créa trouvée en direct, résume de même son nom d'annonce en quelques mots lisibles. Chaque plateforme a sa propre attribution : ne les additionne jamais.",
     ...blocks,
   ].join("\n") : "";
-  cache.set(key, { at: Date.now(), text });
-  return text;
+}
+
+/**
+ * Speed: the chat never waits for the platforms.
+ *  - a pack lives in the shared cache (every serverless instance reads it), for the day it describes;
+ *  - younger than FRESH_MS → served as is; older → served at once AND rebuilt in the background;
+ *  - nothing stored yet → built with a short wait on the platforms (QUICK_MS); what did not
+ *    answer in time falls back on the warehouse, says so, and the full pack is rebuilt behind;
+ *  - opening the bot's page prepares it (warmBotAdsPack), so the first question finds it ready.
+ */
+const FRESH_MS = 30 * 60_000;
+const KEEP_MS = 12 * 3600_000;
+const QUICK_MS = 4_000;
+const WARM_MS = 28_000;
+/** `complete`: every platform answered (else some totals come from the warehouse, with a ⚠ note). */
+interface StoredPack { text: string; at: number; complete: boolean }
+/** An incomplete pack is retried behind an answer at most this often. */
+const RETRY_MS = 5 * 60_000;
+
+function planOf(accounts: BotAdsAccounts): Array<[WarehousePlatform, string[]]> {
+  const plan: Array<[WarehousePlatform, string[]]> = [];
+  if (accounts.meta) plan.push(["meta", [accounts.meta.replace(/^act_/, "")]]);
+  if (accounts.google) plan.push(["google", [accounts.google.replace(/-/g, "")]]);
+  if (accounts.tiktok?.length) plan.push(["tiktok", accounts.tiktok]);
+  return plan;
+}
+const sharedKey = (botId: string, plan: unknown, now: Date) => `botpack:v1:${botId}:${JSON.stringify(plan)}:${window(1, now).range.until}`;
+
+async function readShared(key: string): Promise<StoredPack | null> {
+  try {
+    const row = await prisma.kpiCache.findUnique({ where: { key } });
+    if (!row || row.expiresAt.getTime() <= Date.now()) return null;
+    const v = JSON.parse(row.payload) as StoredPack;
+    return typeof v?.text === "string" && typeof v.at === "number" ? { ...v, complete: v.complete !== false } : null;
+  } catch { return null; }
+}
+async function writeShared(key: string, text: string, complete: boolean): Promise<void> {
+  try {
+    const payload = JSON.stringify({ text, at: Date.now(), complete } satisfies StoredPack);
+    const expiresAt = new Date(Date.now() + KEEP_MS);
+    await prisma.kpiCache.upsert({ where: { key }, create: { key, payload, expiresAt }, update: { payload, expiresAt } });
+  } catch { /* the cache is a speed-up, never a failure */ }
+}
+
+async function compose(botId: string, plan: Array<[WarehousePlatform, string[]]>, now: Date, liveTimeoutMs: number): Promise<{ text: string; complete: boolean }> {
+  const missed: WarehousePlatform[] = [];
+  const blocks = await Promise.all(plan.map(([p, ids]) => platformBlock(botId, p, ids, now, liveTimeoutMs, missed).catch(() => { missed.push(p); return `### ${PLATFORM_LABEL[p]}\n${liveNote(p, "entrepôt de l'agence momentanément illisible")}`; })));
+  return { text: packText(botId, blocks), complete: missed.length === 0 };
+}
+
+/**
+ * The block for the bot's prompt ("" when the bot has no ad account), and
+ * whether it should be rebuilt behind the answer (`stale`: served from an
+ * older copy, or built without waiting for every platform).
+ */
+export async function botAdsPack(botId: string, accounts: BotAdsAccounts, now = new Date()): Promise<{ text: string; stale: boolean }> {
+  const plan = planOf(accounts);
+  if (!plan.length) return { text: "", stale: false };
+  const key = sharedKey(botId, plan, now);
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.at < TTL) return { text: hit.text, stale: false };
+  const shared = await readShared(key);
+  if (shared) {
+    const age = Date.now() - shared.at;
+    if (shared.complete && age < FRESH_MS) { cache.set(key, { at: shared.at, text: shared.text }); return { text: shared.text, stale: false }; }
+    return { text: shared.text, stale: shared.complete || age > RETRY_MS };
+  }
+  const built = await compose(botId, plan, now, QUICK_MS);
+  if (built.complete) cache.set(key, { at: Date.now(), text: built.text });
+  await writeShared(key, built.text, built.complete);
+  return { text: built.text, stale: !built.complete };
+}
+
+/** Rebuilds the pack with a long wait on the platforms and stores it (page opening, background refresh). Skipped when a fresh one exists. */
+export async function warmBotAdsPack(botId: string, accounts: BotAdsAccounts, now = new Date()): Promise<void> {
+  const plan = planOf(accounts);
+  if (!plan.length) return;
+  const key = sharedKey(botId, plan, now);
+  const shared = await readShared(key);
+  if (shared?.complete && Date.now() - shared.at < FRESH_MS) return;
+  const built = await compose(botId, plan, now, WARM_MS);
+  // An incomplete pack never replaces a complete one.
+  if (built.complete || !shared?.complete) await writeShared(key, built.text, built.complete);
+  if (built.complete) cache.set(key, { at: Date.now(), text: built.text });
+}
+
+/** The block alone (see botAdsPack). */
+export async function buildBotAdsPack(botId: string, accounts: BotAdsAccounts, now = new Date()): Promise<string> {
+  return (await botAdsPack(botId, accounts, now)).text;
 }

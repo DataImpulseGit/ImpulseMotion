@@ -24,7 +24,7 @@ const relayCalls: RelayChatBody[] = [];
 const saved: Array<Record<string, unknown>> = [];
 let role = "client";
 
-vi.mock("@/lib/bot-ads-pack", () => ({ buildBotAdsPack: vi.fn(async () => "") }));
+vi.mock("@/lib/bot-ads-pack", () => ({ botAdsPack: vi.fn(async () => ({ text: "", stale: false })), warmBotAdsPack: vi.fn(async () => undefined) }));
 vi.mock("@/lib/auth-helpers", () => ({
   requireSession: async () => ({ session: { userId: "u1", role, user: { email: "client@lpev.fr" } } }),
   isStaff: (s: { role?: string }) => s.role === "admin" || s.role === "consultant",

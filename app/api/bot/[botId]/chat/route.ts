@@ -19,14 +19,14 @@
  *      it (AiJob) with the ledger context of its usage line.
  */
 
-import { NextRequest, NextResponse } from "next/server";
+import { after, NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { isStaff, requireSession } from "@/lib/auth-helpers";
 import { loadBotFor } from "@/lib/bot-access";
 import { parseMessages, parseSources, serversForSources, type BotMessage } from "@/lib/bot-types";
 import { buildBotSystemPrompt } from "@/lib/bot-prompt";
 import { loadBotCoverage, loadBotDatasets } from "@/lib/bot-context";
-import { buildBotAdsPack } from "@/lib/bot-ads-pack";
+import { botAdsPack, warmBotAdsPack } from "@/lib/bot-ads-pack";
 import { getDashboardTikTokIds } from "@/lib/tiktok-accounts";
 import type { RelayChatBody, RelayMessage } from "@/lib/relay-chat";
 import { appendBotMessages, jobTitle, runningJobCount, runningJobOf, startAiJob } from "@/lib/ai-jobs";
@@ -101,11 +101,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ bot
   if (!datasets.length) delete sources.files;
   // Creatives + ad performance of the bot's own accounts (warehouse, cached
   // 15 min): the common questions are answered without a tool round trip.
-  const adsPack = await buildBotAdsPack(bot.id, {
+  const adAccounts = {
     meta: sources.meta ? bot.dashboard.metaAccountId : null,
     google: sources.google ? bot.dashboard.googleCustomerId : null,
     tiktok: tiktokIds,
-  }).catch(() => "");
+  };
+  // Never waits for the platforms: a stored pack is served at once and refreshed behind the answer.
+  const pack = await botAdsPack(bot.id, adAccounts).catch(() => ({ text: "", stale: false }));
+  const adsPack = pack.text;
+  if (pack.stale) after(() => warmBotAdsPack(bot.id, adAccounts).catch(() => undefined));
   const systemPrompt = buildBotSystemPrompt({ bot: { ...bot, sources }, dashboard: bot.dashboard, coverage, tiktokAdvertiserIds: tiktokIds, datasets, adsPack });
 
   const accountScope: NonNullable<RelayChatBody["accountScope"]> = {};

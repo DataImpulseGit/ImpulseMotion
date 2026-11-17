@@ -303,7 +303,7 @@ const KEEP_ACTIONS = new Set([
   "subscribe", "schedule", "contact", "start_trial", "app_install", "omni_app_install",
 ]);
 
-function dailyFromInsight(accountId: string, i: MetaCreativeInsightRich, conversionEvent: string): DailyRow | null {
+export function dailyFromInsight(accountId: string, i: MetaCreativeInsightRich, conversionEvent: string): DailyRow | null {
   const spend = num(i.spend);
   const impressions = int(i.impressions);
   if (spend <= 0 && impressions <= 0) return null;

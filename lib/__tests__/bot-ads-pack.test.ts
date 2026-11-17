@@ -1,10 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
-vi.mock("@/lib/ads-warehouse/query", () => ({ queryAds: vi.fn() }));
+vi.mock("@/lib/ads-warehouse/query", async (orig) => ({ ...(await orig<typeof import("@/lib/ads-warehouse/query")>()), queryAds: vi.fn() }));
+// The platforms are not called in tests: by default they do not answer (fallback on the warehouse).
+const live = vi.fn();
+vi.mock("@/lib/account-days", async (orig) => ({ ...(await orig<typeof import("@/lib/account-days")>()), liveAccountDays: (...a: unknown[]) => live(...a) }));
+vi.mock("@/lib/kpi-cache", () => ({ cached: (_k: string, f: () => unknown) => f() }));
+vi.mock("@/lib/meta-api", () => ({}));
+vi.mock("@/lib/account-settings", () => ({}));
+vi.mock("@/lib/ads-warehouse/meta", () => ({}));
+vi.mock("@/lib/ads-warehouse/google", () => ({}));
+vi.mock("@/lib/relay-tool", () => ({}));
 const states = vi.fn();
 vi.mock("@/lib/prisma", () => ({ prisma: { adSyncState: { findMany: (...a: unknown[]) => states(...a) } } }));
 import { queryAds } from "@/lib/ads-warehouse/query";
 import { buildBotAdsPack, imageUrl, window } from "@/lib/bot-ads-pack";
 import { buildBotSystemPrompt } from "@/lib/bot-prompt";
+import { calendarPeriods, sumDays, ZERO_SUMS } from "@/lib/account-days";
+import { deriveMetrics } from "@/lib/ads-warehouse/query";
 
 describe("bot ads pack", () => {
   it("window: last N complete days and the N before", () => {
@@ -26,6 +37,8 @@ describe("bot ads pack", () => {
 const metrics = (spend: number, impressions: number) => ({ spend, impressions, ctr: 0.01, cpm: 5, hookRate: 0, conversions: 0, cpa: 0, roas: 0, roasUnavailable: true, conversionValue: 0, videoPlays: 0, estimated: false });
 const result = (spend: number, impressions: number) => ({ currency: "EUR", rows: [], benchmark: metrics(spend, impressions), benchmarkPrevious: null });
 const NOW = new Date("2026-11-05T10:00:00Z");
+import { beforeEach } from "vitest";
+beforeEach(() => { live.mockReset(); live.mockRejectedValue(new Error("pas de réponse")); });
 
 describe("bot ads pack — données manquantes → recherche en direct", () => {
   it("compte absent de l'entrepôt → note ⚠ qui envoie vers l'outil Meta en direct", async () => {
@@ -52,8 +65,10 @@ describe("bot ads pack — données manquantes → recherche en direct", () => {
   it("entrepôt à jour et complet → aucune note", async () => {
     vi.mocked(queryAds).mockResolvedValue(result(100, 5000) as never);
     states.mockResolvedValue([{ syncedTo: new Date("2026-11-04T00:00:00Z") }]);
+    live.mockResolvedValue([{ ...ZERO_SUMS, date: "2026-11-04", spend: 100, impressions: 5000, clicks: 50, linkClicks: 50 }]);
     const t = await buildBotAdsPack("b-ok", { meta: "1" }, NOW);
     expect(t).not.toContain("⚠ Meta");
+    expect(t).toContain("lus en direct sur Meta Ads");
   });
 });
 
@@ -109,17 +124,44 @@ describe("bot ads pack — libellés des totaux (avis Decathlon Travel, 16/11/20
   });
 
   it("Google : total du compte entier lu en direct (Performance Max comprise), écarts sur la même base", async () => {
-    const { googleTotals, totalsLine } = await import("@/lib/bot-ads-pack");
-    const days = [
-      { date: "2026-11-02", spend: 16562.22, impressions: 593726, clicks: 24203, conversions: 26.08, conversionValue: 27899.3 },
-      { date: "2026-11-09", spend: 14688.11, impressions: 525174, clicks: 26787, conversions: 24.4, conversionValue: 22872.65 },
-    ];
-    const cur = googleTotals(days, { since: "2026-11-09", until: "2026-11-15" }, { ...base, leads: 0 });
-    const prev = googleTotals(days, { since: "2026-11-02", until: "2026-11-08" }, { ...base, leads: 0 });
+    const { totalsLine } = await import("@/lib/bot-ads-pack");
+    const g = (date: string, spend: number, impressions: number, clicks: number, conversions: number, value: number) => ({ ...ZERO_SUMS, date, spend, impressions, clicks, linkClicks: clicks, conversions, purchases: conversions, conversionValue: value, purchaseValue: value });
+    const days = [g("2026-11-02", 16562.22, 593726, 24203, 26.08, 27899.3), g("2026-11-09", 14688.11, 525174, 26787, 24.4, 22872.65)];
+    const cur = deriveMetrics(sumDays(days, { since: "2026-11-09", until: "2026-11-15" }), null);
+    const prev = deriveMetrics(sumDays(days, { since: "2026-11-02", until: "2026-11-08" }), null);
     expect(cur.spend).toBe(14688.11);
     expect(cur.roas).toBe(1.56);
     const line = totalsLine(cur, prev, "EUR");
     expect(line).toMatch(/dépense 14\s688\s€ \(-11 %\)/);
     expect(line).toMatch(/ROAS 1,56 \(-7 %\)/);
+  });
+
+  it("Google sans réponse de la plateforme : le bloc dit que le total est partiel", async () => {
+    vi.mocked(queryAds).mockResolvedValue(result(100, 5000) as never);
+    states.mockResolvedValue([{ syncedTo: new Date("2026-11-04T00:00:00Z") }]);
+    const t = await buildBotAdsPack("b-g", { google: "123" }, NOW);
+    expect(t).toContain("PAS Performance Max");
+  });
+
+  it("le bloc donne la dépense hors annonces et les semaines calendaires quand la plateforme répond", async () => {
+    vi.mocked(queryAds).mockResolvedValue(result(100, 5000) as never);
+    states.mockResolvedValue([{ syncedTo: new Date("2026-11-04T00:00:00Z") }]);
+    live.mockResolvedValue([{ ...ZERO_SUMS, date: "2026-11-01", spend: 80, impressions: 900 }, { ...ZERO_SUMS, date: "2026-11-04", spend: 150, impressions: 7000 }]);
+    const t = await buildBotAdsPack("b-g2", { google: "124" }, NOW);
+    expect(t).toContain("Dont campagnes sans annonces (Performance Max)");
+    expect(t).toContain("Semaine du lundi 26/10 au dimanche 01/11");
+    expect(t).toContain("Mois en cours, novembre 2026 (du 01/11 au 04/11)");
+  });
+
+  it("périodes calendaires : semaines lundi → dimanche, mois en cours vs mêmes jours du mois d'avant", () => {
+    const p = calendarPeriods("2026-11-16");
+    expect(p[0].range).toEqual({ since: "2026-11-09", until: "2026-11-15" });
+    expect(p[0].compare).toEqual({ since: "2026-11-02", until: "2026-11-08" });
+    expect(p[4].range).toEqual({ since: "2026-11-01", until: "2026-11-16" });
+    expect(p[4].compare).toEqual({ since: "2026-10-01", until: "2026-10-16" });
+    expect(p[5].range).toEqual({ since: "2026-10-01", until: "2026-10-31" });
+    expect(p[5].compare).toEqual({ since: "2026-09-01", until: "2026-09-30" });
+    // A Sunday is itself the end of the last complete week.
+    expect(calendarPeriods("2026-11-15")[0].range.until).toBe("2026-11-15");
   });
 });

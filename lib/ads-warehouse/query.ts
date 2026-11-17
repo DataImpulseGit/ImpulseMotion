@@ -122,7 +122,7 @@ export interface AdsQueryResult {
   };
 }
 
-type Sums = {
+export type Sums = {
   spend: number; impressions: number; reach: number; clicks: number; linkClicks: number; conversions: number; conversionValue: number;
   purchases: number; purchaseValue: number; leads: number; videoPlays: number; video3s: number; thruPlays: number; p25: number; p50: number; p75: number; p100: number;
 };
