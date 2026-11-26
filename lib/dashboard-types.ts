@@ -1,5 +1,6 @@
 import { parseConversionEvent } from "@/lib/meta-actions";
 import { VIDEO_METRICS, VIDEO_METRIC_LABELS } from "@/lib/video-metrics";
+import { AB_TESTS_DEFAULT_MATCH, AB_TESTS_LEARNINGS_CHARS } from "@/lib/ab-tests";
 
 /**
  * Client-safe part of the dashboard widget system: types, catalogue and
@@ -7,7 +8,7 @@ import { VIDEO_METRICS, VIDEO_METRIC_LABELS } from "@/lib/video-metrics";
  * Server-side resolution lives in lib/dashboard-widgets.ts.
  */
 
-export const WIDGET_TYPES = ["kpi", "platform_table", "timeseries", "table", "top_creatives", "pacing", "text", "funnel", "demographics", "geo_device", "alerts", "crm_funnel", "crm_attribution", "meta_actions"] as const;
+export const WIDGET_TYPES = ["kpi", "platform_table", "timeseries", "table", "top_creatives", "pacing", "text", "funnel", "demographics", "geo_device", "alerts", "crm_funnel", "crm_attribution", "meta_actions", "ab_tests"] as const;
 export type WidgetType = (typeof WIDGET_TYPES)[number];
 
 export const KPI_METRICS = ["spend", "revenue", "roas", "ctr", "cpa", "cpc", "cr", "purchases", "clicks", "impressions", ...VIDEO_METRICS] as const;
@@ -28,7 +29,7 @@ export const META_ACTIONS_MAX = 30;
 export const KPI_SOURCES: readonly string[] = ["meta", "google", "tiktok", "combined"];
 
 /** Widgets whose Meta conversions follow `conversionEvent` (override of the account setting). */
-export const CONVERSION_WIDGET_TYPES = ["kpi", "timeseries", "table", "top_creatives", "platform_table", "funnel", "demographics", "geo_device"] as const;
+export const CONVERSION_WIDGET_TYPES = ["kpi", "timeseries", "table", "top_creatives", "platform_table", "funnel", "demographics", "geo_device", "ab_tests"] as const;
 
 /** Human/AI-facing catalogue — also consumed by the copilot tool definitions. */
 export const WIDGET_TYPE_INFO: Record<WidgetType, { label: string; configDoc: string }> = {
@@ -83,6 +84,10 @@ export const WIDGET_TYPE_INFO: Record<WidgetType, { label: string; configDoc: st
   meta_actions: {
     label: "Actions Meta",
     configDoc: `{ actions?: string[] (≤ ${META_ACTIONS_MAX} action_type Meta, ex. ["link_click","landing_page_view","omni_add_to_cart","omni_purchase"] ; vide = toutes les actions du compte, doublons retirés), limit?: 1-50 (défaut 15, ignoré si actions est fourni) } — volume, coût par action, valeur trackée et %Δ vs période de comparaison, par type d'action Meta ; nécessite un compte Meta lié`,
+  },
+  ab_tests: {
+    label: "Tests créa (labo) + learnings",
+    configDoc: `{ match?: string (défaut "labo" : texte cherché dans le nom de la campagne ou de l'ensemble de publicités de test), limit?: 1-30 (défaut 12), learnings?: string (≤ ${AB_TESTS_LEARNINGS_CHARS} caractères, Markdown : les learnings rédigés pour le client) } — un test = un ensemble de publicités : ses créas avec visuel, dépense, conversions, coût par conversion, ROAS, et un verdict (gagnant / dans la moyenne / perdant / trop tôt) contre le coût par conversion du compte sur la période ; constats chiffrés automatiques ; nécessite un compte Meta lié ; largeur conseillée full`,
   },
   crm_attribution: {
     label: "Attribution CRM (HubSpot)",
@@ -232,6 +237,14 @@ function validateTypedConfig(type: WidgetType, cfg: Record<string, unknown>): Re
     case "crm_attribution": {
       const limit = Math.min(Math.max(Number(cfg.limit ?? 10) || 10, 1), 50);
       return { limit };
+    }
+    case "ab_tests": {
+      const match = String(cfg.match ?? AB_TESTS_DEFAULT_MATCH).trim().slice(0, 60) || AB_TESTS_DEFAULT_MATCH;
+      const limit = Math.min(Math.max(Number(cfg.limit ?? 12) || 12, 1), 30);
+      const learnings = String(cfg.learnings ?? "");
+      if (learnings.length > AB_TESTS_LEARNINGS_CHARS) throw widgetIssue(`Learnings trop longs (${AB_TESTS_LEARNINGS_CHARS} caractères max)`);
+      const learningsAt = typeof cfg.learningsAt === "string" && !Number.isNaN(Date.parse(cfg.learningsAt)) ? cfg.learningsAt : null;
+      return { match, limit, learnings, ...(learnings && learningsAt ? { learningsAt } : {}) };
     }
     case "meta_actions": {
       const rawList = Array.isArray(cfg.actions) ? cfg.actions : [];

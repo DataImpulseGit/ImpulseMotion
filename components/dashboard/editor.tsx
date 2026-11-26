@@ -39,11 +39,13 @@ interface WidgetFormState {
   conversionEvent: string;
   /** meta_actions: types sélectionnés ([] = toutes) */
   actions: string[];
+  /** ab_tests: texte cherché dans le nom des campagnes / ensembles de test */
+  match: string;
 }
 
 const emptyForm: WidgetFormState = {
   type: "kpi", title: "", width: "half", metric: "spend", source: "meta",
-  kind: "campaigns", limit: 10, markdown: "", conversionEvent: "", actions: [],
+  kind: "campaigns", limit: 10, markdown: "", conversionEvent: "", actions: [], match: "labo",
 };
 
 const isConversionType = (t: WidgetType) => (CONVERSION_WIDGET_TYPES as readonly string[]).includes(t);
@@ -79,6 +81,8 @@ function typedConfig(f: WidgetFormState): Record<string, unknown> {
       return { kind: source === "tiktok" ? "campaigns" : f.kind, source, limit: f.limit };
     }
     case "top_creatives": return { limit: f.limit };
+    // learnings are not sent: PATCH merges configs, so the ones already written stay.
+    case "ab_tests": return { match: f.match.trim() || "labo", limit: Math.min(Math.max(f.limit || 12, 1), 30) };
     case "platform_table":
     case "pacing": return {};
     case "text": return { markdown: f.markdown };
@@ -106,6 +110,7 @@ function widgetToForm(w: ResolvedWidget): WidgetFormState {
     markdown: String(c.markdown ?? ""),
     conversionEvent: typeof c.conversionEvent === "string" ? c.conversionEvent : "",
     actions: Array.isArray(c.actions) ? c.actions.map(String) : [],
+    match: String(c.match ?? "labo"),
   };
 }
 
@@ -367,6 +372,25 @@ export function WidgetForm({
             className={inputCls + " w-20"}
             title="Nombre d'actions affichées"
           />
+        )}
+        {form.type === "ab_tests" && (
+          <>
+            <input
+              value={form.match} maxLength={60}
+              onChange={(e) => set({ match: e.target.value })}
+              className={inputCls + " w-40"}
+              placeholder="labo"
+              title="Texte cherché dans le nom de la campagne ou de l'ensemble de publicités de test"
+            />
+            <input
+              type="number" min={1} max={30}
+              value={form.limit}
+              onChange={(e) => set({ limit: Number(e.target.value) })}
+              className={inputCls + " w-20"}
+              title="Nombre de tests affichés"
+            />
+            <span className="text-[11px] text-ui-muted self-center">Un test = un ensemble de publicités dont la campagne ou le nom contient ce texte.</span>
+          </>
         )}
         {(form.type === "table" || form.type === "top_creatives" || form.type === "alerts" || form.type === CRM_ATTRIBUTION) && (
           <input

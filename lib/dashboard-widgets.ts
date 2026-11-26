@@ -16,7 +16,7 @@ import { prisma } from "@/lib/prisma";
 import { cached, cachedWithMeta, ttlForRange } from "@/lib/kpi-cache";
 import {
   getMetaSystemToken,
-  getAdsPaged,
+  getAdsByIds,
   getAdInsightsPaged,
   getAccountDailyInsightsPaged,
   getCampaignInsightsPaged,
@@ -28,8 +28,13 @@ import {
   purchasesFor,
   getCustomConversionNames,
   type MetaAccountInsight,
+  type MetaAd,
   type MetaBreakdownInsight,
 } from "@/lib/meta-api";
+import { createHash } from "node:crypto";
+import { fetchLargeThumbnails } from "@/lib/ads-warehouse/meta";
+import { fmtMoney } from "@/components/portfolio/format";
+import { AB_TESTS_ADS_SHOWN, AB_TESTS_DEFAULT_MATCH, isTestRow, summarizeTests, type TestAdRow } from "@/lib/ab-tests";
 import { getAccountInsightsCachedWithMeta } from "@/lib/insights";
 import { getAccountProfileSettings } from "@/lib/account-settings";
 import { relayDirectTool } from "@/lib/relay-tool";
@@ -871,46 +876,136 @@ async function resolveTable(cfg: Record<string, unknown>, ctx: ResolveContext) {
   };
 }
 
+/** Ad-level insights of the account over the period (shared by the creative widgets, one read per period). */
+async function loadAdInsights(ctx: ResolveContext, accountId: string) {
+  // Errors propagate, nothing empty is cached.
+  return cachedWithMeta(
+    `meta:ad-insights:${accountId}:${ctx.since}_${ctx.until}`,
+    async () => {
+      const insights = await getAdInsightsPaged(ctx.token, accountId, { since: ctx.since, until: ctx.until }, { max: 5000 });
+      return { insights: insights.data, truncated: insights.truncated };
+    },
+    { ttlMs: ttlForRange({ since: ctx.since, until: ctx.until }) },
+  );
+}
+
+const AD_DETAILS_TTL_MS = 6 * 3600_000;
+const idsKey = (ids: string[]) => createHash("sha1").update(ids.join(",")).digest("hex").slice(0, 20);
+
+/**
+ * The creative of the ads a widget shows — only those. (The whole ad list of
+ * an account with thousands of ads takes over a minute to read and comes back
+ * cut: the dashboard timed out and the visuals of recent ads were missing.)
+ */
+async function loadAdsFor(token: string, accountId: string, adIds: string[]): Promise<Map<string, MetaAd>> {
+  const ids = [...new Set(adIds)].sort();
+  if (!ids.length) return new Map();
+  const list = await cached(`meta:ads-by-id:${accountId}:${idsKey(ids)}`, () => getAdsByIds(token, accountId, ids), AD_DETAILS_TTL_MS);
+  return new Map(list.map((a) => [a.id, a]));
+}
+
+const SHARP_THUMBS_BUDGET_MS = 15_000;
+
+/**
+ * A visual sharp enough for a card. `image_url` is the full image of a plain
+ * image ad; most ads (videos, catalogue, flexible / Advantage+ creatives) only
+ * carry `thumbnail_url`, 64 px wide by default — blurry once enlarged. For
+ * those the creative's 1200 px thumbnail is read (kept 6 h; the small one
+ * stays as a fallback).
+ */
+async function sharpAdImages(token: string, ads: Array<MetaAd | undefined>): Promise<Map<string, string | null>> {
+  const out = new Map<string, string | null>();
+  const need = new Map<string, string[]>(); // creative id → ad ids
+  for (const ad of ads) {
+    if (!ad) continue;
+    out.set(ad.id, ad.creative?.image_url ?? ad.creative?.thumbnail_url ?? null);
+    if (ad.creative?.image_url || !ad.creative?.id) continue;
+    need.set(ad.creative.id, [...(need.get(ad.creative.id) ?? []), ad.id]);
+  }
+  if (!need.size) return out;
+  const ids = [...need.keys()].sort();
+  const large = await cached(
+    `meta:creative-thumbs:${idsKey(ids)}`,
+    async () => Object.fromEntries(await fetchLargeThumbnails(token, ids, Date.now() + SHARP_THUMBS_BUDGET_MS)),
+    AD_DETAILS_TTL_MS,
+  ).catch(() => ({} as Record<string, string>));
+  for (const [creativeId, adIds] of need) {
+    const url = large[creativeId];
+    if (url) for (const adId of adIds) out.set(adId, url);
+  }
+  return out;
+}
+
 async function resolveTopCreatives(cfg: Record<string, unknown>, ctx: ResolveContext) {
   if (!ctx.binding.metaAccountId) throw issue("Aucun compte Meta autorisé pour ce dashboard");
   const limit = Number(cfg.limit ?? 6);
   const accountId = ctx.binding.metaAccountId;
+  const { data: payload, fetchedAt } = await loadAdInsights(ctx, accountId);
 
-  // Full paginated lists (max 5000 each) — errors propagate, nothing empty is cached.
-  const { data: payload, fetchedAt } = await cachedWithMeta(
-    `meta:top-creatives:${accountId}:${ctx.since}_${ctx.until}`,
-    async () => {
-      const [ads, insights] = await Promise.all([
-        getAdsPaged(ctx.token, accountId, { max: 5000 }),
-        getAdInsightsPaged(ctx.token, accountId, { since: ctx.since, until: ctx.until }, { max: 5000 }),
-      ]);
-      return { ads: ads.data, insights: insights.data, truncated: ads.truncated || insights.truncated };
-    },
-    { ttlMs: ttlForRange({ since: ctx.since, until: ctx.until }) },
-  );
-
-  const adsById = new Map(payload.ads.map((a) => [a.id, a]));
   const currency = payload.insights.find((i) => i.account_currency)?.account_currency ?? ctx.currency ?? undefined;
-  const creatives = [...payload.insights]
-    .sort((a, b) => toNum(b.spend) - toNum(a.spend))
-    .slice(0, limit)
-    .map((i) => {
-      const ad = adsById.get(i.ad_id);
-      const rev = computeRevenue(i, ctx.aov, ctx.conversionEvent);
-      return {
-        adId: i.ad_id,
-        name: i.ad_name,
-        imageUrl: ad?.creative?.image_url ?? ad?.creative?.thumbnail_url ?? null,
-        spend: Math.round(toNum(i.spend)),
-        ctr: Math.round(toNum(i.ctr) * 100) / 100,
-        hookRate: computeHookRate(i),
-        roas: computeRoas(i, ctx.aov, ctx.conversionEvent),
-        cpa: computeCpa(i, ctx.conversionEvent),
-        estimated: rev.estimated,
-        ...(rev.unavailable ? { unavailable: true } : {}),
-      };
-    });
+  const top = [...payload.insights].sort((a, b) => toNum(b.spend) - toNum(a.spend)).slice(0, limit);
+  // A visual that cannot be read never hides the figures.
+  const adsById = await loadAdsFor(ctx.token, accountId, top.map((i) => i.ad_id)).catch(() => new Map<string, MetaAd>());
+  const images = await sharpAdImages(ctx.token, top.map((i) => adsById.get(i.ad_id)));
+  const creatives = top.map((i) => {
+    const rev = computeRevenue(i, ctx.aov, ctx.conversionEvent);
+    return {
+      adId: i.ad_id,
+      name: i.ad_name,
+      imageUrl: images.get(i.ad_id) ?? null,
+      spend: Math.round(toNum(i.spend)),
+      ctr: Math.round(toNum(i.ctr) * 100) / 100,
+      hookRate: computeHookRate(i),
+      roas: computeRoas(i, ctx.aov, ctx.conversionEvent),
+      cpa: computeCpa(i, ctx.conversionEvent),
+      estimated: rev.estimated,
+      ...(rev.unavailable ? { unavailable: true } : {}),
+    };
+  });
   return { creatives, truncated: payload.truncated, fetchedAt, ...(currency ? { currency } : {}) };
+}
+
+/** Test ads whose creative is read (format, visual): beyond, a test keeps its figures without them. */
+const AB_TESTS_MAX_ADS = 300;
+
+/** Creative tests run as one ad set per test in a test campaign (lib/ab-tests.ts). */
+async function resolveAbTests(cfg: Record<string, unknown>, ctx: ResolveContext) {
+  if (!ctx.binding.metaAccountId) throw issue("Aucun compte Meta autorisé pour ce dashboard");
+  const accountId = ctx.binding.metaAccountId;
+  const match = String(cfg.match ?? AB_TESTS_DEFAULT_MATCH);
+  const limit = Number(cfg.limit ?? 12);
+  const { data: payload, fetchedAt } = await loadAdInsights(ctx, accountId);
+  const currency = payload.insights.find((i) => i.account_currency)?.account_currency ?? ctx.currency ?? undefined;
+  // Creative of the test ads only (format + visual), the most spending first.
+  const testAdIds = payload.insights
+    .filter((i) => toNum(i.spend) > 0 && isTestRow({ campaignName: i.campaign_name ?? "", adsetName: i.adset_name ?? "" }, match))
+    .sort((a, b) => toNum(b.spend) - toNum(a.spend))
+    .slice(0, AB_TESTS_MAX_ADS)
+    .map((i) => i.ad_id);
+  const adsById = await loadAdsFor(ctx.token, accountId, testAdIds).catch(() => new Map<string, MetaAd>());
+  let estimated = false;
+  let unavailable = false;
+  const rows: TestAdRow[] = payload.insights.map((i) => {
+    const rev = computeRevenue(i, ctx.aov, ctx.conversionEvent);
+    if (rev.estimated) estimated = true;
+    if (rev.unavailable) unavailable = true;
+    return {
+      adId: i.ad_id, adName: i.ad_name ?? "", adsetId: i.adset_id ?? "", adsetName: i.adset_name ?? "", campaignName: i.campaign_name ?? "",
+      spend: toNum(i.spend), conversions: purchasesFor(i, ctx.conversionEvent), revenue: rev.unavailable ? 0 : rev.revenue,
+      ctr: toNum(i.ctr), hookRate: computeHookRate(i), video: !!adsById.get(i.ad_id)?.creative?.video_id, imageUrl: null,
+    };
+  });
+  const summary = summarizeTests(rows, { match, limit, money: (n) => fmtMoney(n, currency) });
+  const images = await sharpAdImages(ctx.token, summary.tests.flatMap((t) => t.ads.slice(0, AB_TESTS_ADS_SHOWN).map((a) => adsById.get(a.adId))));
+  for (const t of summary.tests) for (const a of t.ads) a.imageUrl = images.get(a.adId) ?? null;
+  return {
+    ...summary, match,
+    learnings: String(cfg.learnings ?? ""),
+    learningsAt: typeof cfg.learningsAt === "string" ? cfg.learningsAt : null,
+    conversionEvent: ctx.conversionEvent,
+    estimated, ...(unavailable ? { unavailable: true } : {}),
+    truncated: payload.truncated, fetchedAt, ...(currency ? { currency } : {}),
+  };
 }
 
 // ── Platform overview table ──────────────────────────────────────────────────
@@ -1523,6 +1618,7 @@ async function resolveWidgetData(
     case "timeseries": return resolveTimeseries(cfg, ctx);
     case "table": return resolveTable(cfg, ctx);
     case "top_creatives": return resolveTopCreatives(cfg, ctx);
+    case "ab_tests": return resolveAbTests(cfg, ctx);
     case "pacing": return resolvePacing(cfg, ctx);
     case "funnel": return resolveFunnel(cfg, ctx);
     case "demographics": return resolveDemographics(cfg, ctx);

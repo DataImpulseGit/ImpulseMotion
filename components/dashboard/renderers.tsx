@@ -29,6 +29,7 @@ import {
   type PacingData, type PlatformTableData, type TableData, type TimeseriesData, type TopCreativesData,
 } from "@/components/dashboard/widget-display";
 import { METRIC_LABELS } from "@/lib/dashboard-types";
+import { AbTestsWidget } from "@/components/dashboard/ab-tests-widget";
 import { VIDEO_METRICS, videoMetricNote } from "@/lib/video-metrics";
 
 const KPI_LABELS: Record<string, string> = METRIC_LABELS;
@@ -48,6 +49,7 @@ export function WidgetBody({ widget }: { widget: ResolvedWidget }) {
     case "timeseries": return <TimeseriesWidget widget={widget} />;
     case "table": return <TableWidget widget={widget} />;
     case "top_creatives": return <TopCreativesWidget widget={widget} />;
+    case "ab_tests": return <AbTestsWidget widget={widget} />;
     case "pacing": return <PacingWidget widget={widget} />;
     case "text": return <TextWidget widget={widget} />;
     case "funnel": return <FunnelWidget widget={widget} />;

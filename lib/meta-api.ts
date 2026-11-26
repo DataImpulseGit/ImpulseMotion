@@ -815,6 +815,27 @@ export async function getAdsPaged(
   }, opts.max ?? META_DEFAULT_MAX);
 }
 
+/**
+ * The given ads of an account, with their creative — for a screen that shows a
+ * few dozen ads of a period. Reading the whole ad list instead (getAdsPaged)
+ * takes over a minute on an account with thousands of ads and is cut at 5000.
+ */
+export async function getAdsByIds(accessToken: string, adAccountId: string, adIds: string[]): Promise<MetaAd[]> {
+  const ids = [...new Set(adIds.filter((id) => /^\d+$/.test(id)))];
+  const out: MetaAd[] = [];
+  const CHUNK = 50;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    const page = await metaFetchAll<MetaAd>(`/${actId(adAccountId)}/ads`, accessToken, {
+      fields: ADS_BASIC_FIELDS,
+      filtering: JSON.stringify([{ field: "id", operator: "IN", value: chunk }]),
+      limit: "100",
+    }, chunk.length);
+    out.push(...page.data);
+  }
+  return out;
+}
+
 /** Get ads for an account with creative info (fully paginated; `_limit` kept for signature compat). */
 export async function getAds(
   accessToken: string,
