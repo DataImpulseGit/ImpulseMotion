@@ -57,12 +57,20 @@ export function metricDirection(label: string): { dir: Direction; rank: boolean 
 
 const CELL = /^([+\-−–]?)\s*[x×]?\s*(\d[\d\s.,]*)\s*([kK]|M|Md)?\s*(€|\$|£|%|pts?|pp|x|×|eur|j|s|min|h)?$/i;
 
+const LEADING_DELTA = /^([+\-−–]\s*\d[\d\s.,]*\s*(?:%|pts?|pp))(?=\s*[(:;,]|\s+(?:vs|par|sur)\b)/i;
+
 /** « 1 234,5 € », « 12,3 % », « +12 % », « ×3,2 » → number ; anything else → null. */
 export function parseCell(text: string): ParsedCell {
   const t = text.replace(/[  ]/g, " ").trim();
   if (!t) return null;
-  const m = CELL.exec(t);
-  if (!m) return null;
+  let m = CELL.exec(t);
+  if (!m) {
+    // « +13 % (vs 459,45 €) » : a change followed by a remark is still a change.
+    const lead = LEADING_DELTA.exec(t);
+    if (!lead) return null;
+    m = CELL.exec(lead[1]);
+    if (!m) return null;
+  }
   let digits = m[2].replace(/\s/g, "");
   const lastComma = digits.lastIndexOf(",");
   const lastDot = digits.lastIndexOf(".");

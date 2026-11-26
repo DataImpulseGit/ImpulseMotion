@@ -14,6 +14,13 @@ describe("parseCell", () => {
     expect(parseCell("−8 %")).toEqual({ value: -8, delta: true });
     expect(parseCell("-2,5 pts")).toEqual({ value: -2.5, delta: true });
   });
+  it("lit une évolution suivie d'une remarque", () => {
+    expect(parseCell("+13 % (vs 459,45 €)")).toEqual({ value: 13, delta: true });
+    expect(parseCell("-6 % (vs 349,82 €)")).toEqual({ value: -6, delta: true });
+    expect(parseCell("+2 pts vs S-1")).toEqual({ value: 2, delta: true });
+    expect(parseCell("1 achat (589,69 €) la semaine précédente")).toBeNull();
+    expect(parseCell("-10 °C ressentis")).toBeNull();
+  });
   it("laisse le texte tranquille", () => {
     expect(parseCell("Campagne 2026")).toBeNull();
     expect(parseCell("—")).toBeNull();
@@ -89,6 +96,16 @@ describe("buildTableView", () => {
   it("moins de trois lignes : pas de classement", () => {
     const t = buildTableView(["Plateforme", "ROAS"], [["Meta", "4"], ["Google", "2"]]);
     expect(t.tones.flat().every((x) => x === null)).toBe(true);
+  });
+});
+
+describe("évolution avec remarque", () => {
+  it("colore selon l'indicateur nommé dans l'en-tête", () => {
+    const t = buildTableView(
+      ["Campagne", "Dépense", "Coût/achat", "Évolution coût/achat"],
+      [["A", "4 679 €", "519,98 €", "+13 % (vs 459,45 €)"], ["B", "1 315 €", "328,77 €", "-6 % (vs 349,82 €)"], ["C", "648 €", "—", "1 achat la semaine précédente"]],
+    );
+    expect(t.tones.map((r) => r[3])).toEqual(["neg", "pos", null]);
   });
 });
 
