@@ -15,11 +15,11 @@ describe("tests du labo", () => {
   });
 
   it("juge un test contre le coût par conversion du compte", () => {
-    expect(verdictOf(150, 1, 100)).toBe("early"); // peu dépensé, peu converti
+    expect(verdictOf(140, 1, 100)).toBe("early"); // peu dépensé, peu converti
     expect(verdictOf(240, 3, 100)).toBe("winner");
     expect(verdictOf(360, 3, 100)).toBe("average"); // 120, entre 100 et 130
     expect(verdictOf(450, 3, 100)).toBe("loser");
-    expect(verdictOf(250, 0, 100)).toBe("loser"); // assez dépensé, rien
+    expect(verdictOf(160, 0, 100)).toBe("loser"); // une fois et demie le repère dépensée, rien
     expect(verdictOf(250, 2, 100)).toBe("average"); // 125 : pas encore 3 conversions, mais dans la zone
     expect(verdictOf(500, 5, 0)).toBe("early"); // pas de repère
   });

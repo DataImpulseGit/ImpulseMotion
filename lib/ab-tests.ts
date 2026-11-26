@@ -8,7 +8,7 @@
  * Verdict of a test, against the cost per conversion of all the tests together
  * on the period (the tests are judged against each other; with fewer than 5
  * conversions in the tests, against the account's converting campaigns):
- *   - « trop tôt »   : fewer than 3 conversions and less than twice that cost spent;
+ *   - « trop tôt »   : fewer than 3 conversions and less than one and a half times that cost spent;
  *   - « gagnant »    : 3 conversions or more, at the account's cost or under;
  *   - « perdant »    : enough spent, and a cost 30 % above the account's (or no conversion);
  *   - « dans la moyenne » : the rest.
@@ -30,7 +30,7 @@ export const AB_TESTS_ADS_SHOWN = 4;
 const LOSER_FACTOR = 1.3;
 /** Conversions the tests need together before they are judged against each other. */
 const LABO_MIN_CONVERSIONS = 5;
-const ENOUGH_SPEND_FACTOR = 2;
+const ENOUGH_SPEND_FACTOR = 1.5;
 
 /** One ad over the period, already reduced to what the tests need. */
 export interface TestAdRow {

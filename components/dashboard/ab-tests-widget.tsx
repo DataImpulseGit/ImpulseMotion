@@ -45,7 +45,7 @@ const TALLY_LABEL: Record<TestVerdict, [string, string]> = {
 
 const img = (url: string) => `/api/media/proxy-image?url=${encodeURIComponent(url)}&upgrade=1`;
 
-function TestCard({ t, currency, noRevenue }: { t: AbTest; currency?: string; noRevenue: boolean }) {
+function TestCard({ t, currency }: { t: AbTest; currency?: string }) {
   const shown = t.ads.slice(0, AB_TESTS_ADS_SHOWN);
   const more = t.ads.length - shown.length;
   return (
@@ -56,7 +56,7 @@ function TestCard({ t, currency, noRevenue }: { t: AbTest; currency?: string; no
           <div className="mt-0.5 text-[11px] text-ui-muted tabular-nums">
             {fmtMoney(t.spend, currency, { digits: 0 })} · {fmtNumber(t.conversions, 1)} conv.
             {t.cpa > 0 && <> · {fmtMoney(t.cpa, currency)} / conv.</>}
-            {!noRevenue && t.roas > 0 && <> · ROAS {fmtRoas(t.roas)}</>}
+            {t.roas > 0 && <> · ROAS {fmtRoas(t.roas)}</>}
           </div>
         </div>
         <span className={`shrink-0 rounded-md px-2 py-0.5 text-[11px] font-medium ${VERDICT_CLS[t.verdict]}`}>{VERDICT_LABEL[t.verdict]}</span>
@@ -120,7 +120,6 @@ export function AbTestsWidget({ widget, period }: { widget: ResolvedWidget; peri
       </div>
     );
   }
-  const noRevenue = !!d.unavailable;
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2">
@@ -184,11 +183,11 @@ export function AbTestsWidget({ widget, period }: { widget: ResolvedWidget; peri
       </div>
 
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-        {d.tests.map((t) => <TestCard key={t.adsetId} t={t} currency={d.currency} noRevenue={noRevenue} />)}
+        {d.tests.map((t) => <TestCard key={t.adsetId} t={t} currency={d.currency} />)}
       </div>
       <p className="text-[11px] leading-4 text-ui-muted">
         {d.total > d.tests.length && <>{d.tests.length} tests affichés sur {d.total}. </>}
-        Un test est un ensemble de publicités dont la campagne ou le nom contient « {d.match} ». Gagnant : au moins 3 conversions, au coût du repère ou en dessous. Perdant : coût supérieur de 30 % au repère, ou aucune conversion après deux fois ce coût dépensé.
+        Un test est un ensemble de publicités dont la campagne ou le nom contient « {d.match} ». Gagnant : au moins 3 conversions, au coût du repère ou en dessous. Perdant : coût supérieur de 30 % au repère, ou aucune conversion après une fois et demie ce coût dépensé.
       </p>
     </div>
   );
