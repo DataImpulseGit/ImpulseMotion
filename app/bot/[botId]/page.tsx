@@ -10,6 +10,7 @@ import { isStaff } from "@/lib/auth-helpers";
 import { getDashboardTikTokIds } from "@/lib/tiktok-accounts";
 import { BotChat } from "@/components/bot/bot-chat";
 import { runningConversationIds } from "@/lib/ai-jobs";
+import { ROUTINE_SELECT, publicRoutine } from "@/lib/bot-routines";
 
 /** Tab title: the assistant's name (only for someone allowed on it). */
 export async function generateMetadata({ params }: { params: Promise<{ botId: string }> }): Promise<Metadata> {
@@ -52,14 +53,21 @@ export default async function BotPage({ params, searchParams }: { params: Promis
     : 0;
 
   const conversations = await prisma.botConversation.findMany({
-    where: { botId: bot.id, userId: session.userId },
+    // The pages (tabs) have their own conversation: not in the history.
+    where: { botId: bot.id, userId: session.userId, routine: null },
     select: { id: true, title: true, updatedAt: true },
     orderBy: { updatedAt: "desc" },
     take: 50,
   });
   // Threads on which a reply is still being produced (detached turns).
   const running = await runningConversationIds(conversations.map((c) => c.id), session.userId);
-  const initialActiveId = wanted && conversations.some((c) => c.id === wanted) ? wanted : null;
+  // The person's pages (tabs); a notice « réponse prête » of a page opens its tab.
+  const routines = await prisma.botRoutine.findMany({
+    where: { botId: bot.id, userId: session.userId },
+    select: ROUTINE_SELECT,
+    orderBy: [{ position: "asc" }, { createdAt: "asc" }],
+  });
+  const initialActiveId = wanted && (conversations.some((c) => c.id === wanted) || routines.some((r) => r.conversationId === wanted)) ? wanted : null;
 
   return (
     <BotChat
@@ -72,6 +80,7 @@ export default async function BotPage({ params, searchParams }: { params: Promis
       enabled={bot.enabled}
       accessCount={accessCount}
       initialConversations={conversations.map((c) => ({ id: c.id, title: c.title, updatedAt: c.updatedAt.toISOString(), jobId: running.get(c.id) ?? null }))}
+      initialRoutines={routines.map(publicRoutine)}
       initialActiveId={initialActiveId}
     />
   );

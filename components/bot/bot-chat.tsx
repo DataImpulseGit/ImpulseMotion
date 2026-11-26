@@ -27,6 +27,8 @@ import { useVoice } from "@/components/mo/use-voice";
 import { AnswerFeedback, BotFeedbackBox } from "@/components/bot/bot-feedback";
 import { BotTable } from "@/components/bot/bot-table";
 import { BotCreativeCards, looksLikeCreatives } from "@/components/bot/bot-creative-cards";
+import { BotRoutineForm, BotRoutineHead, BotRoutineTabs } from "@/components/bot/bot-routines";
+import { MAX_ROUTINES_PER_USER, type PublicRoutine } from "@/lib/bot-routines";
 
 type ConversationRow = { id: string; title: string | null; updatedAt: string; jobId?: string | null };
 type UiMessage = Pick<BotMessage, "role" | "content">;
@@ -93,6 +95,7 @@ export function BotChat({
   enabled = true,
   accessCount = 0,
   initialConversations,
+  initialRoutines = [],
   initialActiveId = null,
 }: {
   botId: string;
@@ -106,6 +109,8 @@ export function BotChat({
   /** Staff only: number of client accesses (0 → clients cannot reach it yet). */
   accessCount?: number;
   initialConversations: ConversationRow[];
+  /** The person's pages (saved questions shown as tabs); each has its own conversation. */
+  initialRoutines?: PublicRoutine[];
   /** Thread to open first (?c= in the URL), else the most recent one. */
   initialActiveId?: string | null;
 }) {
@@ -128,6 +133,22 @@ export function BotChat({
   const activeRef = useRef<string | null>(activeId);
   activeRef.current = activeId;
   const jobs = useAiJobs();
+  // Pages (tabs): a page is open when its conversation is the active one.
+  const [routines, setRoutines] = useState<PublicRoutine[]>(initialRoutines);
+  const [routineForm, setRoutineForm] = useState<"create" | "edit" | null>(null);
+  const [routineBusy, setRoutineBusy] = useState(false);
+  const [routineError, setRoutineError] = useState<string | null>(null);
+  // Earlier runs shown for one page only: opening another one goes back to its latest run.
+  const [historyFor, setHistoryFor] = useState<string | null>(null);
+  const showHistory = !!activeId && historyFor === activeId;
+  const activeRoutine = routines.find((r) => r.conversationId === activeId) ?? null;
+  // The ordinary conversation to come back to from a page.
+  const lastChatRef = useRef<string | null>(null);
+  function openRoutine(conversationId: string) {
+    if (!activeRoutine) lastChatRef.current = activeId;
+    setRoutineForm(null);
+    setActiveId(conversationId);
+  }
 
   const base = `/api/bot/${botId}`;
   const activeRun = activeId ? runs[activeId] : undefined;
@@ -279,6 +300,7 @@ export function BotChat({
   }, [botId, loadThread, refreshList]);
 
   function newConversation() {
+    setRoutineForm(null);
     setActiveId(null);
     setMessages([]);
     setError(null);
@@ -342,6 +364,92 @@ export function BotChat({
     }
   }
 
+  // ── Pages ────────────────────────────────────────────────────────────────
+  function openChat() {
+    setRoutineForm(null);
+    if (!activeRoutine) return;
+    const back = lastChatRef.current;
+    setActiveId(back && conversations.some((c) => c.id === back) ? back : null);
+    if (!back) setMessages([]);
+  }
+
+  async function patchRoutine(r: PublicRoutine, data: { name?: string; prompt?: string; schedule?: string }): Promise<boolean> {
+    try {
+      const res = await fetch(`${base}/routines/${r.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+      const j = (await res.json().catch(() => ({}))) as { routine?: PublicRoutine; error?: string };
+      if (!res.ok || !j.routine) throw new Error(j.error ?? `Erreur ${res.status}`);
+      const saved = j.routine;
+      setRoutines((prev) => prev.map((x) => (x.id === saved.id ? saved : x)));
+      return true;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Modification impossible");
+      return false;
+    }
+  }
+
+  async function runRoutine(r: PublicRoutine) {
+    if (runs[r.conversationId]) return;
+    setError(null);
+    try {
+      const res = await fetch(`${base}/routines/${r.id}/run`, { method: "POST" });
+      const j = (await res.json().catch(() => ({}))) as { jobId?: string; error?: string };
+      if (res.status === 409 && j.jobId) { follow(r.conversationId, j.jobId); return; }
+      if (!res.ok || !j.jobId) throw new Error(j.error ?? `Erreur ${res.status}`);
+      // The new run starts the page over: what came before is its history.
+      if (activeRef.current === r.conversationId) setMessages((prev) => [...prev, { role: "user", content: r.prompt }]);
+      setRoutines((prev) => prev.map((x) => (x.id === r.id ? { ...x, lastRunAt: new Date().toISOString() } : x)));
+      stickRef.current = true;
+      follow(r.conversationId, j.jobId);
+      window.dispatchEvent(new Event(AI_JOB_STARTED_EVENT));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Mise à jour impossible");
+    }
+  }
+
+  async function submitRoutine(v: { name: string; prompt: string; schedule: string }) {
+    setRoutineBusy(true);
+    setRoutineError(null);
+    try {
+      if (routineForm === "edit" && activeRoutine) {
+        const changed = v.prompt !== activeRoutine.prompt;
+        if (!(await patchRoutine(activeRoutine, v))) return;
+        setRoutineForm(null);
+        // A new question: the page is redone with it at once.
+        if (changed) void runRoutine({ ...activeRoutine, ...v });
+        return;
+      }
+      const res = await fetch(`${base}/routines`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(v) });
+      const j = (await res.json().catch(() => ({}))) as { routine?: PublicRoutine; jobId?: string | null; error?: string };
+      if (!res.ok || !j.routine) throw new Error(j.error ?? `Erreur ${res.status}`);
+      const created = j.routine;
+      setRoutines((prev) => [...prev, created]);
+      setMessages([]);
+      openRoutine(created.conversationId); // the thread loads and its first run is followed
+      if (j.jobId) window.dispatchEvent(new Event(AI_JOB_STARTED_EVENT));
+      else if (j.error) setError(j.error);
+    } catch (e) {
+      setRoutineError(e instanceof Error ? e.message : "Création impossible");
+    } finally {
+      setRoutineBusy(false);
+    }
+  }
+
+  async function removeRoutine(r: PublicRoutine) {
+    if (runs[r.conversationId]) return;
+    if (!window.confirm(`Supprimer la page « ${r.name} » et ses versions précédentes ?`)) return;
+    try {
+      const res = await fetch(`${base}/routines/${r.id}`, { method: "DELETE" });
+      const j = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) throw new Error(j.error ?? `Erreur ${res.status}`);
+      setRoutines((prev) => prev.filter((x) => x.id !== r.id));
+      const back = lastChatRef.current;
+      setActiveId(back && conversations.some((c) => c.id === back) ? back : null);
+      setMessages([]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Suppression impossible");
+    }
+  }
+
   async function stopActive() {
     if (!activeId || !activeRun || activeRun.stopping) return;
     setRuns((prev) => (prev[activeId] ? { ...prev, [activeId]: { ...prev[activeId], stopping: true } } : prev));
@@ -357,7 +465,7 @@ export function BotChat({
   }
 
   // Tables of the replies carry « Ouvrir dans Google Sheets », named after the conversation.
-  const activeTitle = conversations.find((c) => c.id === activeId)?.title || dashboardName;
+  const activeTitle = activeRoutine?.name || conversations.find((c) => c.id === activeId)?.title || dashboardName;
   const mdComponents = useMemo(() => ({
     ...SAFE_MD_COMPONENTS,
     table: ({ children }: { children?: React.ReactNode }) => <BotTable botId={botId} title={activeTitle}>{children}</BotTable>,
@@ -375,7 +483,12 @@ export function BotChat({
 
   const persona = botPersonaName(botName);
   const enabledSources = SOURCE_LABELS.filter(([k]) => !!sources[k]);
-  const showSuggestions = messages.length === 0 && !activeRun && !loadingThread && !sending;
+  const showSuggestions = messages.length === 0 && !activeRun && !loadingThread && !sending && !activeRoutine && !routineForm;
+  // A page shows its latest run: everything after the last time its question was asked.
+  const lastRunIndex = activeRoutine ? messages.reduce((at, m, i) => (m.role === "user" && m.content === activeRoutine.prompt ? i : at), -1) : -1;
+  const firstShown = activeRoutine && !showHistory && lastRunIndex >= 0 ? lastRunIndex + 1 : 0;
+  const lastUserQuestion = [...messages].reverse().find((m) => m.role === "user")?.content;
+  const runningSet = useMemo(() => new Set(Object.keys(runs)), [runs]);
   const runningCount = Object.keys(runs).length;
 
   return (
@@ -481,8 +594,46 @@ export function BotChat({
           </div>
         )}
 
+        <BotRoutineTabs
+          routines={routines}
+          activeRoutineId={activeRoutine?.id ?? null}
+          creating={routineForm === "create"}
+          running={runningSet}
+          canAdd={routines.length < MAX_ROUTINES_PER_USER}
+          onChat={openChat}
+          onOpen={(r) => openRoutine(r.conversationId)}
+          onNew={() => { setRoutineError(null); setRoutineForm("create"); }}
+          onRename={(r, name) => void patchRoutine(r, { name })}
+        />
+
         <div ref={scrollRef} onScroll={onScroll} className="relative flex-1 overflow-y-auto px-4 sm:px-6 py-8">
+          {routineForm ? (
+            <div className="max-w-3xl mx-auto">
+              <BotRoutineForm
+                key={routineForm === "edit" ? activeRoutine?.id : "new"}
+                initial={routineForm === "edit" ? activeRoutine ?? undefined : undefined}
+                suggestedPrompt={!activeRoutine ? lastUserQuestion : undefined}
+                busy={routineBusy}
+                error={routineError}
+                onSubmit={(v) => void submitRoutine(v)}
+                onCancel={() => setRoutineForm(null)}
+              />
+            </div>
+          ) : (
           <div className="max-w-3xl mx-auto space-y-8">
+            {activeRoutine && (
+              <BotRoutineHead
+                routine={activeRoutine}
+                busy={!!activeRun}
+                hasHistory={lastRunIndex > 0}
+                showHistory={showHistory}
+                onRun={() => void runRoutine(activeRoutine)}
+                onSchedule={(schedule) => void patchRoutine(activeRoutine, { schedule })}
+                onEdit={() => { setRoutineError(null); setRoutineForm("edit"); }}
+                onDelete={() => void removeRoutine(activeRoutine)}
+                onToggleHistory={() => setHistoryFor((v) => (v === activeId ? null : activeId))}
+              />
+            )}
             {loadingThread && (
               <div className="text-xs text-ui-muted flex items-center gap-2"><Loader2 className="w-3 h-3 animate-spin" /> Chargement</div>
             )}
@@ -512,7 +663,7 @@ export function BotChat({
               </div>
             )}
             {messages.map((m, i) => (
-              m.role === "user" ? (
+              i < firstShown ? null : m.role === "user" ? (
                 <div key={i} className="flex justify-end">
                   <div className="max-w-[80%] bg-ui-raised text-ui-fg text-sm leading-6 px-4 py-2 rounded-xl whitespace-pre-wrap">{m.content}</div>
                 </div>
@@ -543,6 +694,7 @@ export function BotChat({
             )}
             <div ref={bottomRef} />
           </div>
+          )}
         </div>
 
         {awayFromBottom && messages.length > 0 && (
@@ -613,7 +765,7 @@ export function BotChat({
                 rows={1}
                 disabled={busy}
                 aria-label="Votre question"
-                placeholder={activeRun ? "Réponse en cours sur cette conversation, ouvrez-en une autre pour une nouvelle question" : "Votre question"}
+                placeholder={activeRun ? "Réponse en cours sur cette conversation, ouvrez-en une autre pour une nouvelle question" : activeRoutine ? "Une question sur cette page" : "Votre question"}
                 className="flex-1 resize-none bg-transparent px-2 py-2 text-sm text-ui-fg placeholder:text-ui-muted focus:outline-none max-h-40 disabled:opacity-60"
               />
               {activeRun ? (

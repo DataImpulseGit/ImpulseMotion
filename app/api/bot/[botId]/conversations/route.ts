@@ -42,7 +42,8 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ bot
     } catch { /* best effort */ }
   });
   const rows = await prisma.botConversation.findMany({
-    where: { botId, userId: g.session.userId },
+    // The pages (tabs) have their own conversation: not in the history.
+    where: { botId, userId: g.session.userId, routine: null },
     select: { id: true, title: true, updatedAt: true },
     orderBy: { updatedAt: "desc" },
     take: MAX_LIST,

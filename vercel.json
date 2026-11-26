@@ -50,6 +50,9 @@
     },
     "app/api/cron/bot-packs/route.ts": {
       "maxDuration": 300
+    },
+    "app/api/cron/bot-routines/route.ts": {
+      "maxDuration": 300
     }
   },
   "crons": [
@@ -260,6 +263,18 @@
     {
       "path": "/api/cron/bot-packs",
       "schedule": "40 14 * * *"
+    },
+    {
+      "path": "/api/cron/bot-routines",
+      "schedule": "50 5 * * *"
+    },
+    {
+      "path": "/api/cron/bot-routines",
+      "schedule": "20 6 * * *"
+    },
+    {
+      "path": "/api/cron/bot-routines",
+      "schedule": "50 6 * * *"
     }
   ]
 }

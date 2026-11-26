@@ -28,6 +28,7 @@ model User {
   clientReports        ClientReport[]
   botAccesses          ClientBotAccess[]
   botConversations     BotConversation[]
+  botRoutines          BotRoutine[]
   consoleConversations ConsoleConversation[]
   staffDashboards      StaffDashboard[]
   staffMetrics         StaffMetric[]
@@ -486,6 +487,7 @@ model ClientBot {
   dashboard       Dashboard         @relation(fields: [dashboardId], references: [id], onDelete: Cascade)
   accesses        ClientBotAccess[]
   conversations   BotConversation[]
+  routines        BotRoutine[]
   feedback        BotFeedback[]
 }
 
@@ -534,8 +536,33 @@ model BotConversation {
   updatedAt    DateTime  @updatedAt
   bot          ClientBot @relation(fields: [botId], references: [id], onDelete: Cascade)
   user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  routine      BotRoutine?
 
   @@index([botId, userId, updatedAt])
+}
+
+/// A page of the client bot: a saved question, shown as a tab the person
+/// names, refreshed on demand or on a schedule. Its runs live in its own
+/// conversation (kept out of the history list); private to its owner.
+model BotRoutine {
+  id             String          @id @default(cuid())
+  botId          String
+  userId         String
+  conversationId String          @unique
+  name           String
+  prompt         String          @db.Text
+  /// manual | daily | weekly:1..7 (1 = Monday) | monthly (the 1st)
+  schedule       String          @default("manual")
+  position       Int             @default(0)
+  lastRunAt      DateTime?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  bot            ClientBot       @relation(fields: [botId], references: [id], onDelete: Cascade)
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversation   BotConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([botId, userId, position])
+  @@index([schedule])
 }
 
 /// Conversations of the staff AI console (/ai). Private to their owner: every
