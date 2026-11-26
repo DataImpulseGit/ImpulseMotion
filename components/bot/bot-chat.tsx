@@ -204,7 +204,12 @@ export function BotChat({
 
   // Opening another conversation starts at its latest message.
   // (the scroll event fired by the jump then clears the ↓ button by itself)
-  useEffect(() => { stickRef.current = true; }, [activeId]);
+  // A page is read from its top (title, then the answer): no jump to the end.
+  const onRoutine = !!activeRoutine;
+  useEffect(() => { stickRef.current = !onRoutine; }, [activeId, onRoutine]);
+  useEffect(() => {
+    if (onRoutine && !loadingThread && !stickRef.current) scrollRef.current?.scrollTo({ top: 0 });
+  }, [activeId, onRoutine, loadingThread]);
 
   // Leaving the page stops the following only: the replies go on in the relay.
   useEffect(() => {
@@ -398,7 +403,8 @@ export function BotChat({
       // The new run starts the page over: what came before is its history.
       if (activeRef.current === r.conversationId) setMessages((prev) => [...prev, { role: "user", content: r.prompt }]);
       setRoutines((prev) => prev.map((x) => (x.id === r.id ? { ...x, lastRunAt: new Date().toISOString() } : x)));
-      stickRef.current = true;
+      stickRef.current = false;
+      scrollRef.current?.scrollTo({ top: 0 });
       follow(r.conversationId, j.jobId);
       window.dispatchEvent(new Event(AI_JOB_STARTED_EVENT));
     } catch (e) {
