@@ -6,12 +6,46 @@
  * client's Drive folder and shares it with them; the sheet opens in a new tab.
  */
 
-import { useRef, useState } from "react";
-import { ExternalLink, Loader2, Sheet } from "lucide-react";
+import { Children, isValidElement, useMemo, useRef, useState } from "react";
+import { ArrowDown, ArrowUp, ExternalLink, Loader2, Sheet } from "lucide-react";
+import { buildTableView, sortOrder, type SortState, type Tone } from "@/lib/bot-table-view";
+
+type El = React.ReactElement<{ children?: React.ReactNode }>;
+
+function textOf(node: React.ReactNode): string {
+  if (node === null || node === undefined || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textOf).join("");
+  if (isValidElement(node)) return textOf((node as El).props.children);
+  return "";
+}
+
+const kids = (node: React.ReactNode): El[] => Children.toArray(node).filter(isValidElement) as El[];
+
+/** Header cells and body rows of the Markdown table, as React elements. */
+function readTable(children: React.ReactNode): { head: El[]; body: El[][] } {
+  let head: El[] = [];
+  const body: El[][] = [];
+  for (const section of kids(children)) {
+    for (const tr of kids(section.props.children)) {
+      const cells = kids(tr.props.children);
+      if (section.type === "thead" && head.length === 0) head = cells;
+      else body.push(cells);
+    }
+  }
+  return { head, body };
+}
+
+// Good / bad as a tint behind the figure: the number stays readable in both themes.
+const TONE_STYLE: Record<Exclude<Tone, null>, React.CSSProperties> = {
+  pos: { backgroundColor: "color-mix(in srgb, var(--ui-pos) 20%, transparent)", color: "color-mix(in srgb, var(--ui-pos) 70%, var(--ui-fg))" },
+  neg: { backgroundColor: "color-mix(in srgb, var(--ui-neg) 20%, transparent)", color: "color-mix(in srgb, var(--ui-neg) 70%, var(--ui-fg))" },
+};
 
 export function BotTable({ botId, title, children }: { botId: string; title: string; children?: React.ReactNode }) {
   const ref = useRef<HTMLTableElement>(null);
   const [state, setState] = useState<{ busy: boolean; url?: string; error?: string; notified?: boolean }>({ busy: false });
+  const [sort, setSort] = useState<SortState>(null);
 
   async function exportSheet() {
     const el = ref.current;
@@ -40,13 +74,82 @@ export function BotTable({ botId, title, children }: { botId: string; title: str
     }
   }
 
+  const { head, body } = readTable(children);
+  const headers = head.map((c) => textOf(c.props.children).trim());
+  const rows = body.map((r) => r.map((c) => textOf(c.props.children).trim()));
+  const signature = JSON.stringify([headers, rows]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- headers/rows are rebuilt on every render; their content is the key
+  const view = useMemo(() => buildTableView(headers, rows), [signature]);
+  const order = sortOrder(view, rows, sort);
+  const sortable = rows.length > 2;
+
+  function toggleSort(col: number) {
+    // Figures: best first on the first click. Text: A → Z. Third click: back to the reply's order.
+    const first = view.numeric[col] ? "desc" : "asc";
+    setSort((s) => (s?.col !== col ? { col, dir: first } : s.dir === first ? { col, dir: first === "desc" ? "asc" : "desc" } : null));
+  }
+
   return (
     <div className="not-prose my-4">
-      <div className="overflow-x-auto">
-        <table ref={ref} className="w-full text-xs tabular-nums border-collapse [&_th]:text-left [&_th]:font-medium [&_th]:text-ui-fg2 [&_th]:px-3 [&_th]:py-2 [&_th]:border-b [&_th]:border-ui-line-strong [&_td]:px-3 [&_td]:py-1.5 [&_td]:border-b [&_td]:border-ui-line [&_td]:text-ui-fg">
-          {children}
+      <div className="overflow-x-auto rounded-lg border border-ui-line">
+        <table ref={ref} className="w-full text-xs tabular-nums border-collapse">
+          {head.length > 0 && (
+            <thead>
+              <tr className="bg-ui-raised">
+                {head.map((c, i) => {
+                  const active = sort?.col === i;
+                  const Icon = active && sort?.dir === "asc" ? ArrowUp : ArrowDown;
+                  return (
+                    <th
+                      key={i}
+                      scope="col"
+                      aria-sort={active ? (sort?.dir === "asc" ? "ascending" : "descending") : undefined}
+                      className={`px-3 py-2 font-medium text-ui-fg2 border-b border-ui-line-strong whitespace-nowrap ${view.numeric[i] ? "text-right" : "text-left"} ${i === 0 ? "sticky left-0 bg-ui-raised" : ""}`}
+                    >
+                      {sortable ? (
+                        <button
+                          type="button"
+                          onClick={() => toggleSort(i)}
+                          title="Trier"
+                          className={`group inline-flex items-center gap-1 hover:text-ui-fg transition-colors duration-150 ${view.numeric[i] ? "flex-row-reverse" : ""} ${active ? "text-ui-fg" : ""}`}
+                        >
+                          <span>{c.props.children}</span>
+                          <Icon className={`w-3 h-3 shrink-0 ${active ? "opacity-100" : "opacity-0 group-hover:opacity-40"}`} strokeWidth={1.5} />
+                        </button>
+                      ) : c.props.children}
+                    </th>
+                  );
+                })}
+              </tr>
+            </thead>
+          )}
+          <tbody>
+            {order.map((r) => (
+              <tr key={r} className={`group/row ${view.totals[r] ? "font-medium bg-ui-raised" : "hover:bg-ui-raised"}`}>
+                {body[r].map((c, i) => {
+                  const tone = view.tones[r]?.[i] ?? null;
+                  return (
+                    <td
+                      key={i}
+                      style={tone ? TONE_STYLE[tone] : undefined}
+                      data-tone={tone ?? undefined}
+                      className={`px-3 py-1.5 border-b border-ui-line text-ui-fg ${view.numeric[i] ? "text-right whitespace-nowrap" : "text-left"} ${i === 0 ? `sticky left-0 font-medium ${view.totals[r] ? "bg-ui-raised" : "bg-ui-bg group-hover/row:bg-ui-raised"}` : ""}`}
+                    >
+                      {c.props.children}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
         </table>
       </div>
+      {view.ranked && (
+        <p className="mt-1.5 flex items-center gap-3 text-[11px] text-ui-muted">
+          <span className="inline-flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: "var(--ui-pos)" }} />meilleur que la médiane du tableau</span>
+          <span className="inline-flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: "var(--ui-neg)" }} />moins bon</span>
+        </p>
+      )}
       <div className="mt-2 flex items-center gap-3 text-xs">
         <button
           type="button"
