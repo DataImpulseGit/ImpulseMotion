@@ -12,7 +12,9 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import { PageHeader, Card, Kpi, Pill } from "@/components/ui/surface";
 import { MaxAccountsPanel } from "@/components/admin/max-accounts";
 
-type Totals = { messages: number; inputTokens: number; cacheWriteTokens: number; cacheReadTokens: number; outputTokens: number };
+type Totals = { messages: number; inputTokens: number; cacheWriteTokens: number; cacheReadTokens: number; outputTokens: number; costUsd?: number };
+type MonthCell = { messages: number; tokens: number; costUsd: number };
+type History = { months: string[]; clients: Array<{ key: string; clientName: string; byMonth: Record<string, MonthCell>; total: MonthCell }>; totals: Record<string, MonthCell> };
 type Quota = {
   fiveHour: { utilization: number; resetsAt: string | null } | null;
   sevenDay: { utilization: number; resetsAt: string | null } | null;
@@ -81,6 +83,8 @@ type ClientUsage = {
 };
 
 const int = (n: number) => n.toLocaleString("fr-FR");
+const usd = (n: number) => `${n.toLocaleString("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} $`;
+const monthLabel = (m: string) => new Date(`${m}-15T12:00:00Z`).toLocaleDateString("fr-FR", { month: "short", year: "2-digit" });
 
 type MoPathStats = { path: string; turns: number; p50FirstCardMs: number | null; p90FirstCardMs: number | null; p50TotalMs: number | null; misunderstood: number };
 type MoMeasures =
@@ -208,6 +212,16 @@ function QuotaBar({ label, window, warn, limit }: { label: string; window: Quota
   );
 }
 
+function MonthCellTd({ c, strong }: { c?: MonthCell; strong?: boolean }) {
+  if (!c || c.messages === 0) return <td className="px-4 py-3 text-right text-ui-muted">·</td>;
+  return (
+    <td className="px-4 py-3 text-right tabular-nums whitespace-nowrap">
+      <div className={strong ? "text-ui-fg font-medium" : "text-ui-fg"}>{usd(c.costUsd)}</div>
+      <div className="text-[11px] font-normal text-ui-muted">{int(c.tokens)} tokens · {int(c.messages)} msg</div>
+    </td>
+  );
+}
+
 function TokenCells({ t, className }: { t: Totals; className: string }) {
   return (
     <>
@@ -223,6 +237,7 @@ function TokenCells({ t, className }: { t: Totals; className: string }) {
 export default function AdminUsagePage() {
   const [month, setMonth] = useState(currentMonth);
   const [clients, setClients] = useState<ClientUsage[]>([]);
+  const [history, setHistory] = useState<History | null>(null);
   const [features, setFeatures] = useState<FeatureUsage[]>([]);
   const [profiles, setProfiles] = useState<ProfileUsage[]>([]);
   const [openProfile, setOpenProfile] = useState<string | null>(null);
@@ -249,6 +264,7 @@ export default function AdminUsagePage() {
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || `Erreur ${res.status}`);
         setClients(data.clients ?? []);
+        setHistory(data.history ?? null);
         setFeatures(data.features ?? []);
         setProfiles(data.profiles ?? []);
         setMo(data.mo ?? null);
@@ -264,8 +280,10 @@ export default function AdminUsagePage() {
           messages: t.messages + c.billable.messages,
           input: t.input + c.billable.inputTokens + c.billable.cacheWriteTokens + c.billable.cacheReadTokens,
           output: t.output + c.billable.outputTokens,
+          cost: t.cost + (c.billable.costUsd ?? 0),
+          staffCost: t.staffCost + (c.staff.costUsd ?? 0),
         }),
-        { messages: 0, input: 0, output: 0 },
+        { messages: 0, input: 0, output: 0, cost: 0, staffCost: 0 },
       ),
     [clients],
   );
@@ -296,7 +314,8 @@ export default function AdminUsagePage() {
         }
       />
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+        <Kpi label="Coût Amazon du mois" value={usd(total.cost + total.staffCost)} sub={`dont ${usd(total.cost)} clients, ${usd(total.staffCost)} tests staff`} />
         <Kpi label="Messages facturables" value={int(total.messages)} sub="envoyés par des comptes clients" />
         <Kpi label="Tokens envoyés au modèle" value={int(total.input)} sub="entrée + cache écrit + cache lu" accent="emerald" />
         <Kpi label="Tokens générés" value={int(total.output)} sub="sortie" accent="amber" />
@@ -304,8 +323,9 @@ export default function AdminUsagePage() {
 
       <p className="text-xs text-ui-muted">
         Compteurs renvoyés par Bedrock à chaque réponse. AWS facture les quatre types à des prix différents
-        (le cache écrit coûte plus cher que l&apos;entrée, le cache lu beaucoup moins) : ils restent séparés pour ton calcul.
-        Les tests faits par un admin ou un consultant sont comptés à part.
+        (le cache écrit coûte plus cher que l&apos;entrée, le cache lu beaucoup moins) : ils restent séparés.
+        Le coût Amazon est calculé à chaque réponse au prix catalogue du modèle, en dollars hors taxes : c&apos;est une estimation,
+        la facture AWS fait foi. Les tests faits par un admin ou un consultant sont comptés à part.
       </p>
 
       {error && <p className="text-sm text-red-400">{error}</p>}
@@ -476,7 +496,8 @@ export default function AdminUsagePage() {
                 <th className="px-4 py-3 font-medium text-right">Cache écrit</th>
                 <th className="px-4 py-3 font-medium text-right">Cache lu</th>
                 <th className="px-4 py-3 font-medium text-right">Sortie</th>
-                <th className="px-4 py-3 font-medium text-right">Tests staff (msg)</th>
+                <th className="px-4 py-3 font-medium text-right">Coût Amazon</th>
+                <th className="px-4 py-3 font-medium text-right">Tests staff</th>
               </tr>
             </thead>
             <tbody>
@@ -491,7 +512,8 @@ export default function AdminUsagePage() {
                       {c.clientKey && <span className="ml-2 text-xs text-ui-muted">{c.clientKey}</span>}
                     </td>
                     <TokenCells t={c.billable} className="px-4 py-3 text-right text-ui-fg2" />
-                    <td className="px-4 py-3 text-right text-ui-muted">{int(c.staff.messages)}</td>
+                    <td className="px-4 py-3 text-right text-ui-fg font-medium tabular-nums">{usd(c.billable.costUsd ?? 0)}</td>
+                    <td className="px-4 py-3 text-right text-ui-muted tabular-nums">{int(c.staff.messages)} msg · {usd(c.staff.costUsd ?? 0)}</td>
                   </tr>
                   {openKey === c.key &&
                     c.users.map((u) => (
@@ -500,6 +522,7 @@ export default function AdminUsagePage() {
                           {u.email} <Pill tone={u.role === "client" ? "blue" : "default"} className="ml-1">{u.role === "client" ? "client" : `${u.role} · non facturé`}</Pill>
                         </td>
                         <TokenCells t={u} className="px-4 py-2 text-right text-ui-fg2" />
+                        <td className="px-4 py-2 text-right text-ui-fg2 tabular-nums">{usd(u.costUsd ?? 0)}</td>
                         <td className="px-4 py-2" />
                       </tr>
                     ))}
@@ -508,6 +531,38 @@ export default function AdminUsagePage() {
             </tbody>
           </table>
         </Card>
+      )}
+
+      {history && history.clients.length > 0 && (
+        <section className="space-y-2">
+          <h2 className="text-base font-medium text-ui-fg">Bedrock — mois par mois</h2>
+          <p className="text-xs text-ui-muted">Coût Amazon et tokens de chaque client sur les six derniers mois, clients et tests staff ensemble.</p>
+          <Card className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-[11px] text-ui-muted border-b border-ui-line">
+                  <th className="px-4 py-3 font-medium">Client</th>
+                  {history.months.map((m) => <th key={m} className="px-4 py-3 font-medium text-right whitespace-nowrap">{monthLabel(m)}</th>)}
+                  <th className="px-4 py-3 font-medium text-right">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.clients.map((c) => (
+                  <tr key={c.key} className="border-b border-ui-line">
+                    <td className="px-4 py-3 text-ui-fg font-medium">{c.clientName}</td>
+                    {history.months.map((m) => <MonthCellTd key={m} c={c.byMonth[m]} />)}
+                    <MonthCellTd c={c.total} strong />
+                  </tr>
+                ))}
+                <tr className="bg-ui-raised font-medium">
+                  <td className="px-4 py-3 text-ui-fg">Total</td>
+                  {history.months.map((m) => <MonthCellTd key={m} c={history.totals[m]} strong />)}
+                  <MonthCellTd c={history.months.reduce((t, m) => ({ messages: t.messages + history.totals[m].messages, tokens: t.tokens + history.totals[m].tokens, costUsd: t.costUsd + history.totals[m].costUsd }), { messages: 0, tokens: 0, costUsd: 0 })} strong />
+                </tr>
+              </tbody>
+            </table>
+          </Card>
+        </section>
       )}
     </div>
   );

@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const create = vi.fn();
 vi.mock("@/lib/prisma", () => ({ prisma: { aiUsage: { create: (...a: unknown[]) => create(...a) } } }));
 
-import { parseUsageEvent, recordBotUsage, summarizeUsage, monthRange, usageCsv, type UsageRow, summarizeByFeature } from "@/lib/ai-usage";
+import { lastMonths, summarizeByMonth, parseUsageEvent, recordBotUsage, summarizeUsage, monthRange, usageCsv, type UsageRow, summarizeByFeature } from "@/lib/ai-usage";
 
 beforeEach(() => create.mockReset());
 
@@ -61,7 +61,7 @@ describe("summarizeUsage", () => {
     expect(out.map((c) => c.clientName)).toEqual(["Sumix", "LPEV"]);
     const lpev = out[1];
     // the four token kinds stay apart: AWS prices each differently
-    expect(lpev.billable).toEqual({ messages: 2, inputTokens: 20, cacheWriteTokens: 2, cacheReadTokens: 10, outputTokens: 40 });
+    expect(lpev.billable).toEqual({ messages: 2, inputTokens: 20, cacheWriteTokens: 2, cacheReadTokens: 10, outputTokens: 40, costUsd: 0 });
     expect(lpev.staff).toMatchObject({ messages: 1, outputTokens: 2 });
     expect(lpev.users.map((u) => u.email)).toEqual(["c@lpev.fr", "melvin@impulse-analytics.com"]);
   });
@@ -90,7 +90,7 @@ describe("monthRange / usageCsv", () => {
     const csv = usageCsv("2026-09", clients).trim().split("\n");
     expect(csv).toHaveLength(2);
     expect(csv[0]).toContain("tokens_entree;tokens_cache_ecrit;tokens_cache_lu;tokens_sortie");
-    expect(csv[1]).toBe('2026-09;"Saveurs; Vie";;a@b.fr;client;oui;1;1;4;3;2');
+    expect(csv[1]).toBe('2026-09;"Saveurs; Vie";;a@b.fr;client;oui;1;1;4;3;2;"0,00"');
   });
 });
 
@@ -105,5 +105,30 @@ describe("summarizeByFeature", () => {
     expect(out.map((f) => f.feature)).toEqual(["report", "copilot"]);
     const copilot = out[1];
     expect(copilot).toMatchObject({ messages: 2, turns: 6, cacheReadTokens: 6000, avgTokensPerMessage: 3610 });
+  });
+});
+
+describe("mois par mois", () => {
+  const r = (createdAt: string, dashboardId: string, userRole: string, costUsd: number) => ({
+    createdAt: new Date(createdAt), dashboardId, clientName: dashboardId.toUpperCase(), clientKey: null, userEmail: "a@b.fr", userRole,
+    inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd,
+  });
+  it("liste les mois, le plus ancien d'abord, en passant l'année", () => {
+    expect(lastMonths("2026-02", 4)).toEqual(["2025-11", "2025-12", "2026-01", "2026-02"]);
+  });
+  it("additionne le coût et les tokens par client et par mois, clients et staff ensemble", () => {
+    const h = summarizeByMonth([
+      r("2026-10-03T10:00:00Z", "dt", "client", 1.5), r("2026-11-01T00:00:00Z", "dt", "admin", 0.5),
+      r("2026-11-20T10:00:00Z", "dt", "client", 2), r("2026-11-21T10:00:00Z", "lpev", "client", 4), r("2026-01-01T10:00:00Z", "dt", "client", 9),
+    ], ["2026-10", "2026-11"]);
+    expect(h.clients.map((c) => c.key)).toEqual(["dt", "lpev"]);
+    expect(h.clients[0].byMonth["2026-11"]).toEqual({ messages: 2, tokens: 30, costUsd: 2.5 });
+    expect(h.clients[0].total.costUsd).toBe(4);
+    expect(h.totals["2026-11"]).toEqual({ messages: 3, tokens: 45, costUsd: 6.5 });
+  });
+  it("le coût suit dans le résumé par client", () => {
+    const [c] = summarizeUsage([r("2026-11-01T00:00:00Z", "dt", "client", 2), r("2026-11-02T00:00:00Z", "dt", "admin", 1)]);
+    expect(c.billable.costUsd).toBe(2);
+    expect(c.staff.costUsd).toBe(1);
   });
 });

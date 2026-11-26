@@ -147,6 +147,8 @@ export interface UsageRow {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  /** List-price cost of the call (USD), as stored on the ledger row. */
+  costUsd?: number;
 }
 
 /** Token counts exactly as Bedrock reports them. The four kinds are priced
@@ -158,6 +160,8 @@ export interface UsageTotals {
   cacheWriteTokens: number;
   cacheReadTokens: number;
   outputTokens: number;
+  /** What Amazon charges for these calls at list price (USD) — an estimate, the AWS invoice is the reference. */
+  costUsd: number;
 }
 
 export interface ClientUsage {
@@ -171,7 +175,7 @@ export interface ClientUsage {
   users: Array<{ email: string; role: string } & UsageTotals>;
 }
 
-const emptyTotals = (): UsageTotals => ({ messages: 0, inputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0, outputTokens: 0 });
+const emptyTotals = (): UsageTotals => ({ messages: 0, inputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0, outputTokens: 0, costUsd: 0 });
 
 export const totalTokens = (t: UsageTotals): number => t.inputTokens + t.cacheWriteTokens + t.cacheReadTokens + t.outputTokens;
 
@@ -181,6 +185,7 @@ function add(t: UsageTotals, r: UsageRow): void {
   t.cacheWriteTokens += r.cacheWriteTokens;
   t.cacheReadTokens += r.cacheReadTokens;
   t.outputTokens += r.outputTokens;
+  t.costUsd += r.costUsd ?? 0;
 }
 
 /** Groups ledger rows by client (dashboard), splitting client vs staff usage. */
@@ -266,7 +271,7 @@ export function summarizeByUser(rows: Array<UsageRow & { feature: string; provid
     if (!p) {
       p = {
         key, userId: r.userId, email: r.userEmail, name: null, role: key === SYSTEM_PROFILE ? SYSTEM_PROFILE : r.userRole,
-        tokens: 0, share: 0, costUsd: 0, subscriptionTokens: 0, bedrockTokens: 0, features: [], byFeature: new Map(), ...emptyTotals(),
+        tokens: 0, share: 0, subscriptionTokens: 0, bedrockTokens: 0, features: [], byFeature: new Map(), ...emptyTotals(),
       };
       by.set(key, p);
     }
@@ -274,7 +279,6 @@ export function summarizeByUser(rows: Array<UsageRow & { feature: string; provid
     add(p, r);
     p.email ??= r.userEmail;
     p.tokens += tokens;
-    p.costUsd += r.costUsd;
     if (r.provider === "bedrock") p.bedrockTokens += tokens; else p.subscriptionTokens += tokens;
     let f = p.byFeature.get(r.feature);
     if (!f) { f = { feature: r.feature, tokens: 0, ...emptyTotals() }; p.byFeature.set(r.feature, f); }
@@ -323,14 +327,52 @@ const csvCell = (v: string | number) => {
 
 /** One line per client and user — ready for a spreadsheet (";" separator, fr-FR Excel). */
 export function usageCsv(month: string, clients: ClientUsage[]): string {
-  const lines = [["mois", "client", "client_key", "utilisateur", "role", "facturable", "messages", "tokens_entree", "tokens_cache_ecrit", "tokens_cache_lu", "tokens_sortie"].join(";")];
+  const lines = [["mois", "client", "client_key", "utilisateur", "role", "facturable", "messages", "tokens_entree", "tokens_cache_ecrit", "tokens_cache_lu", "tokens_sortie", "cout_amazon_usd"].join(";")];
   for (const c of clients) {
     for (const u of c.users) {
       lines.push([
         month, c.clientName, c.clientKey ?? "", u.email, u.role, u.role === "client" ? "oui" : "non",
-        u.messages, u.inputTokens, u.cacheWriteTokens, u.cacheReadTokens, u.outputTokens,
+        u.messages, u.inputTokens, u.cacheWriteTokens, u.cacheReadTokens, u.outputTokens, u.costUsd.toFixed(2).replace(".", ","),
       ].map(csvCell).join(";"));
     }
   }
   return lines.join("\n") + "\n";
+}
+
+// ── Month by month ───────────────────────────────────────────────────────────
+
+export interface MonthCell { messages: number; tokens: number; costUsd: number }
+export interface MonthlyUsage {
+  /** "YYYY-MM", oldest first. */
+  months: string[];
+  clients: Array<{ key: string; clientName: string; byMonth: Record<string, MonthCell>; total: MonthCell }>;
+  totals: Record<string, MonthCell>;
+}
+
+/** The `count` months ending with `month`, oldest first. */
+export function lastMonths(month: string, count: number): string[] {
+  const [y, m] = month.split("-").map(Number);
+  return Array.from({ length: count }, (_, i) => {
+    const d = new Date(Date.UTC(y, m - 1 - (count - 1 - i), 1));
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+  });
+}
+
+/** Per client and per month: messages, tokens and Amazon cost — client and staff calls together (all of it is on the AWS invoice). */
+export function summarizeByMonth(rows: Array<UsageRow & { createdAt: Date }>, months: string[]): MonthlyUsage {
+  const cell = (): MonthCell => ({ messages: 0, tokens: 0, costUsd: 0 });
+  const bump = (c: MonthCell, r: UsageRow) => { c.messages += 1; c.tokens += r.inputTokens + r.cacheWriteTokens + r.cacheReadTokens + r.outputTokens; c.costUsd += r.costUsd ?? 0; };
+  const totals: Record<string, MonthCell> = Object.fromEntries(months.map((m) => [m, cell()]));
+  const byClient = new Map<string, MonthlyUsage["clients"][number]>();
+  for (const r of rows) {
+    const m = `${r.createdAt.getUTCFullYear()}-${String(r.createdAt.getUTCMonth() + 1).padStart(2, "0")}`;
+    if (!totals[m]) continue;
+    const key = r.dashboardId ?? `name:${r.clientName}`;
+    let c = byClient.get(key);
+    if (!c) { c = { key, clientName: r.clientName, byMonth: {}, total: cell() }; byClient.set(key, c); }
+    bump((c.byMonth[m] ??= cell()), r);
+    bump(c.total, r);
+    bump(totals[m], r);
+  }
+  return { months, clients: [...byClient.values()].sort((a, b) => b.total.costUsd - a.total.costUsd || b.total.tokens - a.total.tokens), totals };
 }

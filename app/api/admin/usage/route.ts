@@ -13,7 +13,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/auth-helpers";
-import { SYSTEM_PROFILE, monthRange, profilesCsv, summarizeByFeature, summarizeByUser, summarizeUsage, usageCsv } from "@/lib/ai-usage";
+import { SYSTEM_PROFILE, lastMonths, monthRange, summarizeByMonth, profilesCsv, summarizeByFeature, summarizeByUser, summarizeUsage, usageCsv } from "@/lib/ai-usage";
 import { summarizeMoTurns, type MoTurnSummary } from "@/lib/mo/measure";
 
 export async function GET(req: NextRequest) {
@@ -25,10 +25,20 @@ export async function GET(req: NextRequest) {
     where: { provider: "bedrock", createdAt: { gte: start, lt: end } },
     select: {
       dashboardId: true, clientName: true, clientKey: true, userEmail: true, userRole: true,
-      inputTokens: true, outputTokens: true, cacheReadTokens: true, cacheWriteTokens: true,
+      inputTokens: true, outputTokens: true, cacheReadTokens: true, cacheWriteTokens: true, costUsd: true,
     },
   });
   const clients = summarizeUsage(rows);
+  // Month by month: the six months ending with the one shown.
+  const months = lastMonths(month, HISTORY_MONTHS);
+  const historyRows = await prisma.aiUsage.findMany({
+    where: { provider: "bedrock", createdAt: { gte: monthRange(months[0]).start, lt: end } },
+    select: {
+      createdAt: true, dashboardId: true, clientName: true, clientKey: true, userEmail: true, userRole: true,
+      inputTokens: true, outputTokens: true, cacheReadTokens: true, cacheWriteTokens: true, costUsd: true,
+    },
+  });
+  const history = summarizeByMonth(historyRows, months);
   // Internal view: every surface, every provider — where the tokens go.
   const allRows = await prisma.aiUsage.findMany({
     where: { createdAt: { gte: start, lt: end } },
@@ -76,10 +86,11 @@ export async function GET(req: NextRequest) {
     });
   }
   const mo = await moMeasures(people.map((u) => ({ id: u.id, name: u.name, email: u.email })));
-  return NextResponse.json({ month, clients, features, profiles, mo }, { headers: { "Cache-Control": "no-store" } });
+  return NextResponse.json({ month, clients, history, features, profiles, mo }, { headers: { "Cache-Control": "no-store" } });
 }
 
 export const MO_MEASURE_DAYS = 7;
+const HISTORY_MONTHS = 6;
 
 /** Mo's measures over the last 7 days; `error` instead of numbers when the table is not there yet (migration to deploy). */
 async function moMeasures(known: Array<{ id: string; name: string | null; email: string | null }>): Promise<{ days: number; summary: MoTurnSummary; people: Record<string, string> } | { days: number; error: string }> {
