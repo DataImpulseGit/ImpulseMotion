@@ -29,6 +29,8 @@
  * Cached per account + range + conversionEvent + AOV (KpiCache, ttlForRange).
  */
 
+import { readHookMode } from "@/lib/hook-mode";
+import type { HookMode } from "@/lib/meta-api";
 import {
   metaGraphGet,
   getAdInsightsPaged,
@@ -218,6 +220,8 @@ function dayFrom(d: MetaCreativeInsight, ctx: RevenueContext): DayMetric {
 
 export interface RowContext extends RevenueContext {
   rangeDays: number;
+  /** What « Hook » counts (lib/hook-mode.ts); 3-second views when absent. */
+  hookMode?: HookMode;
 }
 
 /**
@@ -239,7 +243,7 @@ export function rowFromInsight(
   const cpa = computeCpa(insight, ctx.conversionEvent);
   const hasVideoPlays = (insight.video_play_actions?.length ?? 0) > 0;
   const isVideo = !!ad?.creative?.video_id || ad?.creative?.object_type === "VIDEO" || hasVideoPlays;
-  const hookRate = isVideo ? computeHookRate(insight) : 0;
+  const hookRate = isVideo ? computeHookRate(insight, ctx.hookMode) : 0;
   const holdRate = isVideo ? computeHoldRate(insight) : 0;
   const { p25, p50, p75 } = computeVideoDropoff(insight);
   const format: Format = isVideo ? "Video" : !ad ? "Unknown" : isCarouselAd(ad) ? "Carousel" : "Image";
@@ -275,6 +279,7 @@ export function rowFromInsight(
     cpa,
     ctr,
     hookRate,
+    startRate: isVideo ? computeHookRate(insight, "starts") : 0,
     holdRate,
     videoP25Rate: isVideo ? p25 : undefined,
     videoP50Rate: isVideo ? p50 : undefined,
@@ -286,7 +291,7 @@ export function rowFromInsight(
     clicks,
     linkClicks: insight.inline_link_clicks ? Math.round(num(insight.inline_link_clicks)) : undefined,
     conversions: Math.round(conv * 10) / 10,
-    threeSecViews: isVideo ? getActionValue(insight.video_play_actions, "video_view") : 0,
+    threeSecViews: isVideo ? getActionValue(ctx.hookMode === "starts" ? insight.video_play_actions : insight.actions, "video_view") : 0,
     thruplays: isVideo ? getActionValue(insight.video_thruplay_watched_actions, "video_view") : 0,
     trend: extras.trend ?? [],
   };
@@ -295,7 +300,8 @@ export function rowFromInsight(
 /** Sets Winner/Loser/Fatigued/Active relative to the whole list (mutates and returns). */
 export function applyStatus(rows: Creative[]): Creative[] {
   const ref = accountReference(rows);
-  for (const r of rows) r.status = classifyStatus(r, ref);
+  // The fatigue threshold (20 %) was set on video starts: it keeps reading them, whatever « Hook » shows.
+  for (const r of rows) r.status = classifyStatus({ ...r, hookRate: r.startRate ?? r.hookRate }, ref);
   return rows;
 }
 
@@ -355,6 +361,7 @@ export async function buildCreatives(accountId: string, range: DateRange, settin
     conversionEvent: s.conversionEvent,
     accountTracksValue: accountTracksValue(account),
     rangeDays: days,
+    hookMode: await readHookMode(),
   };
 
   const adsById = new Map(adsPaged.data.map((a) => [a.id, a]));
@@ -408,7 +415,7 @@ export async function buildCreativeRows(accountId: string, range: DateRange, set
     getAdInsightsPaged(token, accountId, range, { max: LIST_MAX }),
     getAccountInsightsCached(token, accountId, range),
   ]);
-  const ctx: RowContext = { aov: s.aov, conversionEvent: s.conversionEvent, accountTracksValue: accountTracksValue(account), rangeDays: days };
+  const ctx: RowContext = { aov: s.aov, conversionEvent: s.conversionEvent, accountTracksValue: accountTracksValue(account), rangeDays: days, hookMode: await readHookMode() };
   const rows = insightsPaged.data
     .filter((i) => num(i.impressions) > 0)
     .sort((a, b) => num(b.spend) - num(a.spend))

@@ -34,11 +34,11 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
     benchmark: "≥ 1% correct, ≥ 2% bon, ≥ 3% excellent (Meta).",
   },
   hookRate: {
-    label: "Hook (démarrages / impressions)",
-    description: "Part des impressions qui ont déclenché un démarrage de la vidéo (Meta video_play_actions). Mesure si l'accroche capte l'attention.",
-    formula: "Hook = (Démarrages vidéo / Impressions) × 100",
+    label: "Hook (vues 3 s / impressions)",
+    description: "Part des impressions restées au moins 3 secondes devant la vidéo. Mesure si l'accroche arrête le scroll.",
+    formula: "Hook = (Vues de 3 secondes / Impressions) × 100",
     benchmark: "≥ 25% bon, ≥ 40% excellent. En dessous de 20% = signal de fatigue / accroche faible.",
-    note: "Disponible uniquement pour les formats vidéo. Meta ne fournit pas de « vues 3 s » au niveau annonce : le démarrage (video_play_actions) est la métrique disponible.",
+    note: "Disponible uniquement pour les formats vidéo. Un administrateur peut choisir dans Réglages de compter les démarrages de vidéo à la place (lecture automatique comprise, autour de 85 % sur toute vidéo).",
   },
   holdRate: {
     label: "Hold (ThruPlay / impressions)",

@@ -49,6 +49,60 @@ function IntegrationRow({ name, description, status, initial, color }: { name: s
   );
 }
 
+type HookMode = "views3s" | "starts";
+const HOOK_CHOICES: Array<{ mode: HookMode; label: string; help: string }> = [
+  { mode: "views3s", label: "Vues de 3 secondes", help: "Part des impressions restées 3 secondes devant la vidéo. C'est le hook rate de Meta et de Motion : il départage les vidéos." },
+  { mode: "starts", label: "Démarrages de vidéo", help: "Part des impressions où la vidéo a démarré, lecture automatique comprise : autour de 85 % sur toute vidéo." },
+];
+
+/** What « Hook » counts in the reports, the dashboards and the client pages — one choice for the whole app. */
+function HookModeCard({ canEdit }: { canEdit: boolean }) {
+  const [mode, setMode] = useState<HookMode | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  useEffect(() => {
+    fetch("/api/admin/hook-mode").then((r) => (r.ok ? r.json() : null)).then((j: { mode?: HookMode } | null) => setMode(j?.mode ?? null)).catch(() => setMode(null));
+  }, []);
+  async function choose(next: HookMode) {
+    if (!canEdit || busy || next === mode) return;
+    setBusy(true);
+    setMsg(null);
+    try {
+      const res = await fetch("/api/admin/hook-mode", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: next }) });
+      const j = (await res.json().catch(() => ({}))) as { mode?: HookMode; error?: string };
+      if (!res.ok || !j.mode) throw new Error(j.error ?? `Erreur ${res.status}`);
+      setMode(j.mode);
+      setMsg({ text: "Enregistré. Les dashboards suivent dans la minute ; les rapports déjà rédigés gardent leurs chiffres.", ok: true });
+    } catch (e) {
+      setMsg({ text: e instanceof Error ? e.message : "Erreur", ok: false });
+    } finally {
+      setBusy(false);
+    }
+  }
+  const current = HOOK_CHOICES.find((c) => c.mode === mode);
+  return (
+    <Card padded>
+      <h2 className="text-sm font-medium text-ui-fg">Mesure du Hook (accroche vidéo)</h2>
+      <p className="mt-1 text-xs leading-5 text-ui-muted">Ce que compte « Hook » dans les rapports, les dashboards et les fiches client. Un seul choix pour toute l&apos;application.</p>
+      <div className="mt-3 inline-flex rounded-lg border border-ui-line p-0.5" role="group" aria-label="Mesure du Hook">
+        {HOOK_CHOICES.map((c) => (
+          <button
+            key={c.mode} type="button" aria-pressed={mode === c.mode} disabled={!canEdit || busy || mode === null} onClick={() => void choose(c.mode)}
+            className={`h-8 rounded-md px-3 text-xs ${mode === c.mode ? "bg-ui-raised font-medium text-ui-fg" : "text-ui-fg2 hover:bg-ui-raised"} disabled:cursor-default ${mode === c.mode ? "" : "disabled:opacity-60"}`}
+          >
+            {c.label}{c.mode === "views3s" && " (conseillé)"}
+          </button>
+        ))}
+      </div>
+      {current && <p className="mt-2 text-xs leading-5 text-ui-fg2">{current.help}</p>}
+      {mode === null && <p className="mt-2 text-xs text-ui-muted">Lecture du réglage…</p>}
+      {!canEdit && <p className="mt-2 text-xs text-ui-muted">Seul un administrateur peut changer ce réglage.</p>}
+      {msg && <p className={`mt-2 text-xs ${msg.ok ? "text-ui-pos" : "text-ui-neg"}`}>{msg.text}</p>}
+      <p className="mt-2 text-[11px] leading-4 text-ui-muted">L&apos;onglet « Tests créa » des dashboards et l&apos;Analyse Ads comptent toujours les vues de 3 secondes.</p>
+    </Card>
+  );
+}
+
 export default function SettingsPage() {
   const { data: session } = useSession();
   const isStaff = session?.role === "admin" || session?.role === "consultant";
@@ -97,6 +151,8 @@ export default function SettingsPage() {
         </div>
       </Section>
       )}
+
+      {isStaff && <HookModeCard canEdit={session?.role === "admin"} />}
 
       <Card padded>
         <h2 className="text-sm font-medium text-ui-fg mb-3">Compte</h2>

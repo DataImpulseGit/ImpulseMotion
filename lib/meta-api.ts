@@ -1551,15 +1551,16 @@ export function computeCpa(
   return conversions > 0 && spend > 0 ? Math.round((spend / conversions) * 100) / 100 : 0;
 }
 
+/** What « Hook » counts: 3-second views, or video starts (lib/hook-mode.ts holds the app's choice). */
+export type HookMode = "views3s" | "starts";
+
 /**
- * Video STARTS over impressions (`video_play_actions`, autoplay included):
- * around 85 % on any video. Not the 3-second rate — see computeThreeSecRate.
+ * Hook rate, % of impressions. "views3s": the 3-second views (`video_view` in
+ * `actions`). "starts": the video starts (`video_play_actions`, autoplay
+ * included), around 85 % on any video.
  */
-export function computeHookRate(insight: MetaCreativeInsight): number {
-  const threeSecViews = getActionValue(
-    insight.video_play_actions,
-    "video_view"
-  );
+export function computeHookRate(insight: MetaCreativeInsight, mode: HookMode = "views3s"): number {
+  const threeSecViews = mode === "starts" ? getActionValue(insight.video_play_actions, "video_view") : getActionValue(insight.actions, "video_view");
   const impressions = parseInt(insight.impressions, 10);
   return impressions > 0
     ? Math.round((threeSecViews / impressions) * 10000) / 100

@@ -9,6 +9,7 @@
  * next steps so the AI can follow up on them.
  */
 
+import { readHookMode } from "@/lib/hook-mode";
 import { VIDEO_METRICS, VIDEO_METRIC_LABELS, VIDEO_VIEWS_DEFINITION, videoMetricPlatforms } from "@/lib/video-metrics";
 import { collectDashboardMerchant, type MerchantReport } from "@/lib/merchant-center";
 import { prisma } from "@/lib/prisma";
@@ -222,6 +223,7 @@ async function collectCreatives(
     { ttlMs: ttlForRange({ since, until }) },
   );
   const adsById = new Map(ads.map((a) => [a.id, a]));
+  const hookMode = await readHookMode();
   return [...insights]
     .sort((a, b) => toNum(b.spend) - toNum(a.spend))
     .slice(0, limit)
@@ -239,7 +241,7 @@ async function collectCreatives(
         spend: Math.round(toNum(i.spend)),
         impressions: Math.round(toNum(i.impressions)),
         ctr: Math.round(toNum(i.ctr) * 100) / 100,
-        hookRate: isVideo ? computeHookRate(i) : null,
+        hookRate: isVideo ? computeHookRate(i, hookMode) : null,
         holdRate: isVideo ? computeHoldRate(i) : null,
         dropoff: drop,
         roas: computeRoas(i, aov),

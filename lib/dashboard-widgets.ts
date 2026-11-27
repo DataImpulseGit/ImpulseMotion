@@ -33,9 +33,11 @@ import {
   getCustomConversionNames,
   type MetaAccountInsight,
   type MetaAd,
+  type HookMode,
   type MetaBreakdownInsight,
 } from "@/lib/meta-api";
 import { createHash } from "node:crypto";
+import { readHookMode } from "@/lib/hook-mode";
 import { fetchLargeThumbnails, fetchVideoFrames, type VideoFrame } from "@/lib/ads-warehouse/meta";
 import { fmtMoney } from "@/components/portfolio/format";
 import { AB_TESTS_ADS_SHOWN, AB_TESTS_DEFAULT_MATCH, isTestRow, ratioLabel, summarizeTests, type TestAdRow } from "@/lib/ab-tests";
@@ -359,6 +361,8 @@ export interface CompareRange {
 }
 
 interface ResolveContext {
+  /** What « Hook » counts (lib/hook-mode.ts). */
+  hookMode: HookMode;
   binding: DashboardBinding;
   ownerId: string;
   /** Dashboard being resolved (cache key + HubSpot source lookup). */
@@ -959,7 +963,7 @@ async function resolveTopCreatives(cfg: Record<string, unknown>, ctx: ResolveCon
       imageUrl: images.get(i.ad_id) ?? null,
       spend: Math.round(toNum(i.spend)),
       ctr: Math.round(toNum(i.ctr) * 100) / 100,
-      hookRate: computeHookRate(i),
+      hookRate: computeHookRate(i, ctx.hookMode),
       roas: computeRoas(i, ctx.aov, ctx.conversionEvent),
       cpa: computeCpa(i, ctx.conversionEvent),
       estimated: rev.estimated,
@@ -1690,6 +1694,7 @@ async function buildResolveContext(
   const effectiveCompare: CompareRange | null =
     compare === undefined ? { ...prevRange(since, until), kind: "prev" } : compare;
   return {
+    hookMode: await readHookMode(),
     binding, ownerId: dashboard.userId, since, until, token,
     dashboardId: dashboard.id,
     sourceDashboardIds: dashboard.sourceDashboardIds ?? [],

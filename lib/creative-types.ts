@@ -80,8 +80,10 @@ export interface Creative {
   /** Cost per conversion (account conversion event); 0 without conversion. */
   cpa: number;
   ctr: number;
-  /** Video plays (video_play_actions) / impressions (%). Video only; 0 for images. */
+  /** 3-second views / impressions (%), or video starts when the app is set on starts (lib/hook-mode.ts). Video only; 0 for images. */
   hookRate: number;
+  /** Video starts / impressions (%), whatever « Hook » counts: the fatigue rule is calibrated on it. */
+  startRate?: number;
   /** ThruPlay / impressions (%). Video only. */
   holdRate: number;
   videoP25Rate?: number;
@@ -97,7 +99,7 @@ export interface Creative {
   linkClicks?: number;
   /** Conversions for the account's conversion event (purchase, lead, …). */
   conversions: number;
-  /** video_play_actions (video starts) — numerator of hookRate. */
+  /** Numerator of hookRate: 3-second views, or video starts when the app is set on starts (lib/hook-mode.ts). */
   threeSecViews: number;
   /** ThruPlays (video_thruplay_watched_actions) — numerator of holdRate. */
   thruplays: number;
