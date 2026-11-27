@@ -81,6 +81,7 @@ export interface MetaCreativeInsight {
   video_p25_watched_actions?: Array<{ action_type: string; value: string }>;
   video_p50_watched_actions?: Array<{ action_type: string; value: string }>;
   video_p75_watched_actions?: Array<{ action_type: string; value: string }>;
+  video_p100_watched_actions?: Array<{ action_type: string; value: string }>;
   date_start: string;
   date_stop: string;
 }
@@ -108,19 +109,36 @@ export interface MetaAd {
     title?: string;
     object_story_spec?: {
       link_data?: { link?: string; message?: string; name?: string; description?: string; call_to_action?: { type?: string; value?: { link?: string } } };
-      video_data?: { link_description?: string; title?: string; message?: string; call_to_action?: { type?: string; value?: { link?: string } } };
+      video_data?: { video_id?: string; link_description?: string; title?: string; message?: string; call_to_action?: { type?: string; value?: { link?: string } } };
     };
     asset_feed_spec?: {
       bodies?: MetaAdCreativeText[];
       titles?: MetaAdCreativeText[];
       descriptions?: MetaAdCreativeText[];
       link_urls?: Array<{ website_url?: string; display_url?: string }>;
+      videos?: Array<{ video_id?: string; thumbnail_url?: string }>;
     };
     /** The story ID can be used to resolve a higher-res image when image_url is absent */
     effective_object_story_id?: string;
     /** MD5 hash of the creative image — can be used with /adimages?hashes[] for full-res URL */
     image_hash?: string;
   };
+}
+
+/**
+ * The video of an ad, wherever Meta keeps it: `video_id` on a plain video
+ * creative, the story's video, or the first video of a flexible / Advantage+
+ * creative (asset_feed_spec) — those carry no `video_id` at all.
+ */
+export function adVideoId(ad: Pick<MetaAd, "creative"> | undefined | null): string | null {
+  return adVideoIds(ad)[0] ?? null;
+}
+
+/** Every video of an ad: a flexible creative carries one file per placement (vertical, square…). */
+export function adVideoIds(ad: Pick<MetaAd, "creative"> | undefined | null): string[] {
+  const c = ad?.creative;
+  const ids = [c?.video_id, c?.object_story_spec?.video_data?.video_id, ...(c?.asset_feed_spec?.videos ?? []).map((v) => v.video_id)];
+  return [...new Set(ids.filter((id): id is string => !!id))];
 }
 
 export interface MetaCampaign {
@@ -804,6 +822,10 @@ export async function getAdAccounts(accessToken: string): Promise<MetaAdAccount[
 const ADS_BASIC_FIELDS =
   "id,name,status,creative{id,thumbnail_url,image_url,video_id,object_type,effective_object_story_id,image_hash}";
 
+/** A handful of ads: also where their video is (adVideoId). */
+const ADS_BY_ID_FIELDS =
+  "id,name,status,creative{id,thumbnail_url,image_url,video_id,object_type,effective_object_story_id,image_hash,asset_feed_spec{videos},object_story_spec{video_data{video_id}}}";
+
 export async function getAdsPaged(
   accessToken: string,
   adAccountId: string,
@@ -827,7 +849,7 @@ export async function getAdsByIds(accessToken: string, adAccountId: string, adId
   for (let i = 0; i < ids.length; i += CHUNK) {
     const chunk = ids.slice(i, i + CHUNK);
     const page = await metaFetchAll<MetaAd>(`/${actId(adAccountId)}/ads`, accessToken, {
-      fields: ADS_BASIC_FIELDS,
+      fields: ADS_BY_ID_FIELDS,
       filtering: JSON.stringify([{ field: "id", operator: "IN", value: chunk }]),
       limit: "100",
     }, chunk.length);
@@ -883,7 +905,7 @@ const AD_INSIGHT_FIELDS = [
   "account_currency",
   "actions", "action_values", "purchase_roas", "cost_per_action_type",
   "video_play_actions", "video_thruplay_watched_actions",
-  "video_p25_watched_actions", "video_p50_watched_actions", "video_p75_watched_actions",
+  "video_p25_watched_actions", "video_p50_watched_actions", "video_p75_watched_actions", "video_p100_watched_actions",
 ].join(",");
 
 /** Ad-level insights for a period, paged, with `truncated`. No timeRange → last_30d. */
@@ -1529,6 +1551,10 @@ export function computeCpa(
   return conversions > 0 && spend > 0 ? Math.round((spend / conversions) * 100) / 100 : 0;
 }
 
+/**
+ * Video STARTS over impressions (`video_play_actions`, autoplay included):
+ * around 85 % on any video. Not the 3-second rate — see computeThreeSecRate.
+ */
 export function computeHookRate(insight: MetaCreativeInsight): number {
   const threeSecViews = getActionValue(
     insight.video_play_actions,
@@ -1538,6 +1564,13 @@ export function computeHookRate(insight: MetaCreativeInsight): number {
   return impressions > 0
     ? Math.round((threeSecViews / impressions) * 10000) / 100
     : 0;
+}
+
+/** 3-second views (`video_view` in `actions`) over impressions, %. */
+export function computeThreeSecRate(insight: MetaCreativeInsight): number {
+  const views = getActionValue(insight.actions, "video_view");
+  const impressions = parseInt(insight.impressions, 10);
+  return impressions > 0 ? Math.round((views / impressions) * 10000) / 100 : 0;
 }
 
 export function computeHoldRate(insight: MetaCreativeInsight): number {
@@ -1555,15 +1588,18 @@ export function computeVideoDropoff(insight: MetaCreativeInsight): {
   p25: number;
   p50: number;
   p75: number;
+  p100: number;
 } {
   const impressions = parseInt(insight.impressions, 10);
-  if (!impressions) return { p25: 0, p50: 0, p75: 0 };
+  if (!impressions) return { p25: 0, p50: 0, p75: 0, p100: 0 };
   const p25 = getActionValue(insight.video_p25_watched_actions, "video_view");
   const p50 = getActionValue(insight.video_p50_watched_actions, "video_view");
   const p75 = getActionValue(insight.video_p75_watched_actions, "video_view");
+  const p100 = getActionValue(insight.video_p100_watched_actions, "video_view");
   return {
     p25: Math.round((p25 / impressions) * 10000) / 100,
     p50: Math.round((p50 / impressions) * 10000) / 100,
     p75: Math.round((p75 / impressions) * 10000) / 100,
+    p100: Math.round((p100 / impressions) * 10000) / 100,
   };
 }

@@ -145,12 +145,28 @@ export async function pageTokens(): Promise<Map<string, string>> {
  * /{video_id}?fields=thumbnails with that Page's token; the preferred frame,
  * else the largest. Map adId → frame URL (signed, refreshed on expiry).
  */
-export async function fetchVideoPosters(token: string, ads: Array<{ adId: string; videoId: string }>): Promise<Map<string, string>> {
+export async function fetchVideoPosters(token: string, ads: Array<{ adId: string; videoId: string }>, pick: "preferred" | "inside" = "preferred"): Promise<Map<string, string>> {
+  const frames = await fetchVideoFrames(token, ads, pick);
   const out = new Map<string, string>();
+  for (const a of ads) {
+    const f = frames.get(`${a.adId}:${a.videoId}`);
+    if (f && !out.has(a.adId)) out.set(a.adId, f.uri);
+  }
+  return out;
+}
+
+export interface VideoFrame { uri: string; width: number; height: number }
+
+/**
+ * A frame of each (ad, video) pair with its size — an ad may carry several
+ * videos (one per placement). Key « adId:videoId ».
+ */
+export async function fetchVideoFrames(token: string, ads: Array<{ adId: string; videoId: string }>, pick: "preferred" | "inside" = "preferred"): Promise<Map<string, VideoFrame>> {
+  const out = new Map<string, VideoFrame>();
   if (!ads.length) return out;
   const tokens = await pageTokens();
   if (!tokens.size) return out;
-  const stories = await metaGraphGetEach<{ creative?: { effective_object_story_id?: string } }>(ads.map((a) => a.adId), token, { fields: "creative{effective_object_story_id}" });
+  const stories = await metaGraphGetEach<{ creative?: { effective_object_story_id?: string } }>([...new Set(ads.map((a) => a.adId))], token, { fields: "creative{effective_object_story_id}" });
   type Thumbs = { thumbnails?: { data?: Array<{ uri?: string; width?: number; height?: number; is_preferred?: boolean }> } };
   const queue = ads.filter((a) => tokens.has(stories.get(a.adId)?.creative?.effective_object_story_id?.split("_")[0] ?? ""));
   const worker = async () => {
@@ -158,8 +174,10 @@ export async function fetchVideoPosters(token: string, ads: Array<{ adId: string
       const pageToken = tokens.get(stories.get(a.adId)!.creative!.effective_object_story_id!.split("_")[0])!;
       const v = await metaGraphGet<Thumbs>(`/${a.videoId}`, pageToken, { fields: "thumbnails{uri,width,height,is_preferred}" }).catch(() => null);
       const list = (v?.thumbnails?.data ?? []).filter((t) => t.uri);
-      const best = list.find((t) => t.is_preferred) ?? list.sort((x, y) => (y.width ?? 0) * (y.height ?? 0) - (x.width ?? 0) * (x.height ?? 0))[0];
-      if (best?.uri) out.set(a.adId, best.uri);
+      // Meta's preferred frame is often the opening one — black on a video that fades in.
+      // « inside » takes a frame a third of the way through the list instead.
+      const best = (pick === "inside" && list.length >= 6 ? list[Math.floor(list.length / 3)] : undefined) ?? list.find((t) => t.is_preferred) ?? [...list].sort((x, y) => (y.width ?? 0) * (y.height ?? 0) - (x.width ?? 0) * (x.height ?? 0))[0];
+      if (best?.uri) out.set(`${a.adId}:${a.videoId}`, { uri: best.uri, width: best.width ?? 0, height: best.height ?? 0 });
     }
   };
   await Promise.all(Array.from({ length: Math.min(6, queue.length) }, worker));

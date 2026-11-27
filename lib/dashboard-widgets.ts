@@ -23,6 +23,10 @@ import {
   getAccountBreakdownInsightsPaged,
   computeRevenue,
   computeHookRate,
+  computeVideoDropoff,
+  computeThreeSecRate,
+  adVideoId,
+  adVideoIds,
   computeRoas,
   computeCpa,
   purchasesFor,
@@ -32,9 +36,9 @@ import {
   type MetaBreakdownInsight,
 } from "@/lib/meta-api";
 import { createHash } from "node:crypto";
-import { fetchLargeThumbnails } from "@/lib/ads-warehouse/meta";
+import { fetchLargeThumbnails, fetchVideoFrames, type VideoFrame } from "@/lib/ads-warehouse/meta";
 import { fmtMoney } from "@/components/portfolio/format";
-import { AB_TESTS_ADS_SHOWN, AB_TESTS_DEFAULT_MATCH, isTestRow, summarizeTests, type TestAdRow } from "@/lib/ab-tests";
+import { AB_TESTS_ADS_SHOWN, AB_TESTS_DEFAULT_MATCH, isTestRow, ratioLabel, summarizeTests, type TestAdRow } from "@/lib/ab-tests";
 import { getAccountInsightsCachedWithMeta } from "@/lib/insights";
 import { getAccountProfileSettings } from "@/lib/account-settings";
 import { relayDirectTool } from "@/lib/relay-tool";
@@ -880,7 +884,7 @@ async function resolveTable(cfg: Record<string, unknown>, ctx: ResolveContext) {
 async function loadAdInsights(ctx: ResolveContext, accountId: string) {
   // Errors propagate, nothing empty is cached.
   return cachedWithMeta(
-    `meta:ad-insights:${accountId}:${ctx.since}_${ctx.until}`,
+    `meta:ad-insights2:${accountId}:${ctx.since}_${ctx.until}`,
     async () => {
       const insights = await getAdInsightsPaged(ctx.token, accountId, { since: ctx.since, until: ctx.until }, { max: 5000 });
       return { insights: insights.data, truncated: insights.truncated };
@@ -900,7 +904,7 @@ const idsKey = (ids: string[]) => createHash("sha1").update(ids.join(",")).diges
 async function loadAdsFor(token: string, accountId: string, adIds: string[]): Promise<Map<string, MetaAd>> {
   const ids = [...new Set(adIds)].sort();
   if (!ids.length) return new Map();
-  const list = await cached(`meta:ads-by-id:${accountId}:${idsKey(ids)}`, () => getAdsByIds(token, accountId, ids), AD_DETAILS_TTL_MS);
+  const list = await cached(`meta:ads-by-id2:${accountId}:${idsKey(ids)}`, () => getAdsByIds(token, accountId, ids), AD_DETAILS_TTL_MS);
   return new Map(list.map((a) => [a.id, a]));
 }
 
@@ -967,6 +971,8 @@ async function resolveTopCreatives(cfg: Record<string, unknown>, ctx: ResolveCon
 
 /** Test ads whose creative is read (format, visual): beyond, a test keeps its figures without them. */
 const AB_TESTS_MAX_ADS = 300;
+/** Versions of a video offered in the player. */
+const AB_TESTS_VIDEO_FORMATS = 3;
 
 /** Creative tests run as one ad set per test in a test campaign (lib/ab-tests.ts). */
 async function resolveAbTests(cfg: Record<string, unknown>, ctx: ResolveContext) {
@@ -992,12 +998,31 @@ async function resolveAbTests(cfg: Record<string, unknown>, ctx: ResolveContext)
     return {
       adId: i.ad_id, adName: i.ad_name ?? "", adsetId: i.adset_id ?? "", adsetName: i.adset_name ?? "", campaignName: i.campaign_name ?? "",
       spend: toNum(i.spend), conversions: purchasesFor(i, ctx.conversionEvent), revenue: rev.unavailable ? 0 : rev.revenue,
-      ctr: toNum(i.ctr), hookRate: computeHookRate(i), video: !!adsById.get(i.ad_id)?.creative?.video_id, imageUrl: null,
+      ctr: toNum(i.ctr), hookRate: computeThreeSecRate(i), video: !!adVideoId(adsById.get(i.ad_id)), imageUrl: null,
+      impressions: toNum(i.impressions), retention: computeVideoDropoff(i),
     };
   });
   const summary = summarizeTests(rows, { match, limit, money: (n) => fmtMoney(n, currency) });
   const images = await sharpAdImages(ctx.token, summary.tests.flatMap((t) => t.ads.slice(0, AB_TESTS_ADS_SHOWN).map((a) => adsById.get(a.adId))));
-  for (const t of summary.tests) for (const a of t.ads) a.imageUrl = images.get(a.adId) ?? null;
+  // Videos: every version of the film (one per placement), each with a native
+  // frame at its own ratio; the tallest comes first and gives the card its picture.
+  const pairs = summary.tests.flatMap((t) => t.ads.slice(0, AB_TESTS_ADS_SHOWN)).flatMap((a) =>
+    adVideoIds(adsById.get(a.adId)).slice(0, AB_TESTS_VIDEO_FORMATS).map((videoId) => ({ adId: a.adId, videoId })));
+  const frames = pairs.length
+    ? await cached(`meta:video-frames:${idsKey(pairs.map((v) => `${v.adId}:${v.videoId}`).sort())}`, async () => Object.fromEntries(await fetchVideoFrames(ctx.token, pairs, "inside")), AD_DETAILS_TTL_MS).catch(() => ({} as Record<string, VideoFrame>))
+    : {};
+  for (const t of summary.tests) for (const a of t.ads) {
+    const versions = pairs.filter((v) => v.adId === a.adId).map((v) => ({ id: v.videoId, frame: frames[`${v.adId}:${v.videoId}`] }));
+    const tall = (f?: VideoFrame) => (f && f.width > 0 ? f.height / f.width : 0);
+    versions.sort((x, y) => tall(y.frame) - tall(x.frame));
+    a.formats = versions.map((v) => ({ id: v.id, label: v.frame ? ratioLabel(v.frame.width, v.frame.height) : "Vidéo", poster: v.frame?.uri ?? null }));
+    // Two versions at the same ratio (two cuts): numbered, so the buttons differ.
+    for (const f of a.formats) {
+      const same = a.formats.filter((x) => x.label === f.label);
+      if (same.length > 1) same.forEach((x, i) => { x.label = `${x.label} · ${i + 1}`; });
+    }
+    a.imageUrl = a.formats.find((f) => f.poster)?.poster ?? images.get(a.adId) ?? null;
+  }
   return {
     ...summary, match,
     learnings: String(cfg.learnings ?? ""),

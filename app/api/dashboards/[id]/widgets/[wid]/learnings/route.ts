@@ -17,7 +17,7 @@ import { denyIfDashboardOutOfScope } from "@/lib/dashboard-auth";
 import { validateWidgetConfig } from "@/lib/dashboard-widgets";
 import { relayComplete } from "@/lib/relay-chat";
 import { recordAiUsage } from "@/lib/ai-usage";
-import { AB_TESTS_LEARNINGS_CHARS, VERDICT_LABEL, type AbTest } from "@/lib/ab-tests";
+import { AB_TESTS_LEARNINGS_CHARS, VERDICT_LABEL, type AbTest, type TestBreakdown } from "@/lib/ab-tests";
 
 export const maxDuration = 120;
 
@@ -35,16 +35,28 @@ Règles strictes :
 - S'il y a trop peu de tests concluants pour dégager une tendance, dis-le en une phrase plutôt que de forcer une conclusion.
 - Pas de titre, pas d'introduction, pas de conclusion, pas d'emoji. Vouvoiement.`;
 
-type Body = { text?: unknown; tests?: unknown; benchmark?: unknown; labo?: unknown; period?: unknown; currency?: unknown };
+type Body = { text?: unknown; tests?: unknown; breakdowns?: unknown; benchmark?: unknown; labo?: unknown; period?: unknown; currency?: unknown };
 
 function compactTests(raw: unknown): string {
   const tests = (Array.isArray(raw) ? raw : []).slice(0, 30) as AbTest[];
   return tests.map((t) => {
     const ads = (Array.isArray(t.ads) ? t.ads : []).slice(0, 6)
-      .map((a) => `    - ${String(a.name).slice(0, 120)} (${a.video ? "vidéo" : "image"}) : dépense ${a.spend}, conversions ${a.conversions}, coût/conv ${a.cpa || "—"}, ROAS ${a.roas}, CTR ${a.ctr} %${a.video ? `, accroche 3 s ${a.hookRate} %` : ""}`)
+      .map((a) => `    - ${String(a.name).slice(0, 120)} (${a.video ? "vidéo" : "image"}) : dépense ${a.spend}, conversions ${a.conversions}, coût/conv ${a.cpa || "—"}, ROAS ${a.roas}, CTR ${a.ctr} %${a.video ? `, accroche 3 s ${a.hookRate} %${a.retention ? `, encore devant la vidéo à 25 / 50 / 75 / 100 % de sa durée : ${a.retention.p25} / ${a.retention.p50} / ${a.retention.p75} / ${a.retention.p100} % des impressions` : ""}` : ""}`)
       .join("\n");
     return `- Test « ${String(t.name).slice(0, 120)} » — ${VERDICT_LABEL[t.verdict] ?? t.verdict} : dépense ${t.spend}, conversions ${t.conversions}, coût/conv ${t.cpa || "—"}, ROAS ${t.roas}\n${ads}`;
   }).join("\n");
+}
+
+/** The same ads grouped by what their names say (angle, mechanic, sport…), as figures the AI may quote. */
+function compactBreakdowns(raw: unknown): string {
+  const list = (Array.isArray(raw) ? raw : []).slice(0, 8) as TestBreakdown[];
+  const blocks = list.map((b) => {
+    const lines = (Array.isArray(b.lines) ? b.lines : []).slice(0, 12)
+      .map((l) => `    - ${String(l.name).slice(0, 60)} : ${l.ads} créas, dépense ${l.spend}, conversions ${l.conversions}, coût/conv ${l.cpa || "—"}, ROAS ${l.roas} — ${VERDICT_LABEL[l.verdict] ?? l.verdict}`)
+      .join("\n");
+    return lines ? `- Par ${String(b.label).slice(0, 30).toLowerCase()} (lu dans les noms des créas) :\n${lines}` : "";
+  }).filter(Boolean);
+  return blocks.length ? `\n\nLes mêmes créas regroupées :\n${blocks.join("\n")}` : "";
 }
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string; wid: string }> }) {
@@ -61,7 +73,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   if (typeof body.text === "string") {
     text = body.text.trim();
   } else {
-    const tests = compactTests(body.tests);
+    const onlyTests = compactTests(body.tests);
+    const tests = onlyTests && onlyTests + compactBreakdowns(body.breakdowns);
     if (!tests) return NextResponse.json({ error: "Aucun test à analyser sur cette période." }, { status: 400 });
     const b = (body.benchmark ?? {}) as { cpa?: number; roas?: number };
     const l = (body.labo ?? {}) as { cpa?: number; reference?: number };
