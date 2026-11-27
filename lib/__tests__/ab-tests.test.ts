@@ -110,4 +110,16 @@ describe("tests du labo", () => {
   it("nomme le format d'une vidéo d'après sa taille", () => {
     expect([ratioLabel(1080, 1920), ratioLabel(1080, 1350), ratioLabel(2160, 2160), ratioLabel(3840, 2160), ratioLabel(0, 0)]).toEqual(["Vertical 9:16", "Portrait 4:5", "Carré 1:1", "Paysage 16:9", "Vidéo"]);
   });
+  it("résume les créas qui marchent et celles qui ne marchent pas, la coupe va à une créa qui marche", () => {
+    // repère : 1300 € pour 10 conversions = 130 €
+    const s = summarizeTests([
+      row("1", "A", 300, 6), row("2", "A", 200, 3), row("3", "A", 300, 0),
+      row("4", "B", 400, 1), row("5", "B", 50, 0), row("6", "B", 50, 0),
+    ], { match: "labo", limit: 10, money });
+    expect(s.highlights.works.map((h) => [h.ad.adId, h.test])).toEqual([["1", "A"], ["2", "A"]]);
+    expect(s.highlights.fails.map((h) => h.ad.adId)).toEqual(["4", "3"]);
+    expect([s.highlights.worksTotal, s.highlights.failsTotal, s.highlights.earlyTotal]).toEqual([2, 2, 2]);
+    // Test B : sa créa la moins chère coûte 400 € par conversion — pas de coupe
+    expect(s.tests.flatMap((t) => t.ads).filter((a) => a.best).map((a) => a.adId)).toEqual(["1"]);
+  });
 });

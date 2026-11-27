@@ -118,7 +118,7 @@ export interface TestAd {
   verdict: TestVerdict;
   /** Videos with impressions only: the curve after the 3 s hook. */
   retention: VideoRetention | null;
-  /** Best ad of its test (lowest cost per conversion, else most conversions). */
+  /** Best ad of its test — among those that work only: a cup on a creative that does not work would lie. */
   best: boolean;
 }
 
@@ -140,8 +140,15 @@ export interface TestBreakdown { key: string; label: string; lines: TestLine[] }
 /** Values listed per dimension (the most spending). */
 const BREAKDOWN_LINES = 12;
 
+/** A creative named in the summary, with the test it belongs to. */
+export interface Highlight { ad: TestAd; test: string }
+/** Creatives listed on each side of the summary. */
+export const AB_TESTS_HIGHLIGHTS = 6;
+
 export interface AbTestsSummary {
   tests: AbTest[];
+  /** The straight answer: the creatives that work (cheapest first) and those that do not (most spent first), over every test. */
+  highlights: { works: Highlight[]; fails: Highlight[]; worksTotal: number; failsTotal: number; earlyTotal: number };
   /** Every test of the period, figures only (the table). */
   lines: TestLine[];
   /** The ads of the tests grouped by what their names say — only the dimensions that split them in 2 or more. */
@@ -231,9 +238,8 @@ export function summarizeTests(rows: TestAdRow[], opts: { match: string; limit: 
         retention: r.video && r.retention && r.hookRate > 0 ? r.retention : null, best: false,
       }))
       .sort((a, b) => b.spend - a.spend);
-    // Best ad: a cost per conversion needs conversions; else nothing stands out.
-    const withConv = ads.filter((a) => a.conversions > 0);
-    const best = withConv.sort((a, b) => a.cpa - b.cpa || b.conversions - a.conversions)[0];
+    // Best ad: the cheapest of those that work (verdict « marche »). A test where nothing works has none.
+    const best = ads.filter((a) => a.verdict === "winner").sort((a, b) => a.cpa - b.cpa || b.conversions - a.conversions)[0];
     if (best && ads.length > 1) best.best = true;
     return {
       adsetId,
@@ -275,7 +281,14 @@ export function summarizeTests(rows: TestAdRow[], opts: { match: string; limit: 
     }).sort((a, b) => b.spend - a.spend).slice(0, BREAKDOWN_LINES);
     return [{ key: d.key, label: d.label, lines: out }];
   });
-  return { tests: shown, lines, breakdowns, total: tests.length, benchmark, labo, counts, facts: testFacts(tests, testRows, benchmark, labo, counts, opts.money) };
+  const everyAd = tests.flatMap((t) => t.ads.map((ad): Highlight => ({ ad, test: t.name })));
+  const works = everyAd.filter((h) => h.ad.verdict === "winner").sort((a, b) => a.ad.cpa - b.ad.cpa);
+  const fails = everyAd.filter((h) => h.ad.verdict === "loser").sort((a, b) => b.ad.spend - a.ad.spend);
+  const highlights = {
+    works: works.slice(0, AB_TESTS_HIGHLIGHTS), fails: fails.slice(0, AB_TESTS_HIGHLIGHTS),
+    worksTotal: works.length, failsTotal: fails.length, earlyTotal: everyAd.filter((h) => h.ad.verdict === "early").length,
+  };
+  return { tests: shown, highlights, lines, breakdowns, total: tests.length, benchmark, labo, counts, facts: testFacts(tests, testRows, benchmark, labo, counts, opts.money) };
 }
 
 function testFacts(tests: AbTest[], rows: TestAdRow[], benchmark: AbTestsSummary["benchmark"], labo: AbTestsSummary["labo"], counts: Record<TestVerdict, number>, money: (n: number) => string): string[] {

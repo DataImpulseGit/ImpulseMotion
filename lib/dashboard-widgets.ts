@@ -1007,15 +1007,17 @@ async function resolveAbTests(cfg: Record<string, unknown>, ctx: ResolveContext)
     };
   });
   const summary = summarizeTests(rows, { match, limit, money: (n) => fmtMoney(n, currency) });
-  const images = await sharpAdImages(ctx.token, summary.tests.flatMap((t) => t.ads.slice(0, AB_TESTS_ADS_SHOWN).map((a) => adsById.get(a.adId))));
+  // The creatives that get a picture: those of the cards, and those named in the summary.
+  const pictured = [...new Set([...summary.tests.flatMap((t) => t.ads.slice(0, AB_TESTS_ADS_SHOWN)), ...summary.highlights.works.map((h) => h.ad), ...summary.highlights.fails.map((h) => h.ad)])];
+  const images = await sharpAdImages(ctx.token, pictured.map((a) => adsById.get(a.adId)));
   // Videos: every version of the film (one per placement), each with a native
   // frame at its own ratio; the tallest comes first and gives the card its picture.
-  const pairs = summary.tests.flatMap((t) => t.ads.slice(0, AB_TESTS_ADS_SHOWN)).flatMap((a) =>
+  const pairs = pictured.flatMap((a) =>
     adVideoIds(adsById.get(a.adId)).slice(0, AB_TESTS_VIDEO_FORMATS).map((videoId) => ({ adId: a.adId, videoId })));
   const frames = pairs.length
     ? await cached(`meta:video-frames:${idsKey(pairs.map((v) => `${v.adId}:${v.videoId}`).sort())}`, async () => Object.fromEntries(await fetchVideoFrames(ctx.token, pairs, "inside")), AD_DETAILS_TTL_MS).catch(() => ({} as Record<string, VideoFrame>))
     : {};
-  for (const t of summary.tests) for (const a of t.ads) {
+  for (const a of pictured) {
     const versions = pairs.filter((v) => v.adId === a.adId).map((v) => ({ id: v.videoId, frame: frames[`${v.adId}:${v.videoId}`] }));
     const tall = (f?: VideoFrame) => (f && f.width > 0 ? f.height / f.width : 0);
     versions.sort((x, y) => tall(y.frame) - tall(x.frame));

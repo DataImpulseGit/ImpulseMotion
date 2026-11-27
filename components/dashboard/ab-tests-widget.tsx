@@ -15,7 +15,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ArrowDown, ArrowUp, Loader2, Pencil, Play, Sparkles, Trophy, X } from "lucide-react";
 import type { ResolvedWidget } from "@/lib/dashboard-types";
-import { AB_TESTS_ADS_SHOWN, AB_TESTS_LEARNINGS_CHARS, VERDICT_LABEL, type AbTest, type AbTestsSummary, type TestAd, type TestBreakdown, type TestLine, type TestVerdict } from "@/lib/ab-tests";
+import { AB_TESTS_ADS_SHOWN, AB_TESTS_LEARNINGS_CHARS, VERDICT_LABEL, type AbTest, type AbTestsSummary, type Highlight, type TestAd, type TestBreakdown, type TestLine, type TestVerdict } from "@/lib/ab-tests";
 import { fmtMoney, fmtNumber, fmtRoas } from "@/components/portfolio/format";
 import { SAFE_MD_COMPONENTS } from "@/components/ai/safe-image";
 import { PilotLinksContext } from "@/components/dashboard/renderers";
@@ -90,7 +90,7 @@ function Visual({ a }: { a: TestAd }) {
 }
 
 /** The creative in full: the video played (or the image at full size), its result beside. */
-function Viewer({ a, test, currency, videoSrc, onClose }: { a: TestAd; test: AbTest; currency?: string; videoSrc: string; onClose: () => void }) {
+function Viewer({ a, test, currency, videoSrc, onClose }: { a: TestAd; test: string; currency?: string; videoSrc: string; onClose: () => void }) {
   const [failed, setFailed] = useState(false);
   const [version, setVersion] = useState(a.formats[0]?.id ?? "");
   const current = a.formats.find((f) => f.id === version);
@@ -120,7 +120,7 @@ function Viewer({ a, test, currency, videoSrc, onClose }: { a: TestAd; test: AbT
             <span className={`rounded-md px-2 py-0.5 text-[11px] font-medium ${VERDICT_CLS[a.verdict]}`}>{VERDICT_LABEL[a.verdict]}</span>
             <button type="button" onClick={onClose} className="flex h-7 w-7 items-center justify-center rounded-md text-ui-fg2 hover:bg-ui-raised" aria-label="Fermer"><X className="h-4 w-4" strokeWidth={1.5} /></button>
           </div>
-          <div className="mt-3 text-xs text-ui-muted">Test « {test.name} »</div>
+          <div className="mt-3 text-xs text-ui-muted">Test « {test} »</div>
           <div className="mt-1 break-words text-sm font-medium leading-5 text-ui-fg">{creativeLabel(a)}</div>
           {a.tags.length > 0 && <div className="mt-1 break-all text-[10px] leading-4 text-ui-muted">{a.name}</div>}
           {a.video && a.formats.length > 1 && (
@@ -187,7 +187,7 @@ function TestCard({ t, ads, currency, onOpen }: { t: AbTest; ads: TestAd[]; curr
                   <span className="flex h-9 w-9 items-center justify-center rounded-full bg-black/55 text-white transition group-hover:scale-110 group-hover:bg-black/70"><Play className="ml-0.5 h-4 w-4" fill="currentColor" strokeWidth={0} /></span>
                 </span>
               )}
-              {a.best && <span className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-ui-pos text-white" title="Meilleure créa du test"><Trophy className="h-3 w-3" strokeWidth={2} /></span>}
+              {a.best && <span className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-ui-pos text-white" title="Meilleure créa du test : celle qui marche au coût le plus bas"><Trophy className="h-3 w-3" strokeWidth={2} /></span>}
             </button>
             <div className="mt-1.5"><span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${VERDICT_CLS[a.verdict]}`}>{SHORT_VERDICT[a.verdict]}</span></div>
             <div className="mt-1 truncate text-[11px] text-ui-fg2">{creativeLabel(a)}</div>
@@ -231,6 +231,57 @@ const VERDICT_SOLID: Record<TestVerdict, string> = {
   average: "bg-black/65 text-white",
   early: "bg-black/65 text-white",
 };
+
+/** The straight answer, before any detail: which creatives work, which do not. */
+function Highlights({ h, currency, onOpen }: { h: AbTestsSummary["highlights"]; currency?: string; onOpen: (x: Highlight) => void }) {
+  const column = (title: string, total: number, list: Highlight[], tone: "pos" | "neg", empty: string) => (
+    <div className="min-w-0 rounded-xl border border-ui-line bg-ui-bg p-3">
+      <div className="flex items-center gap-2">
+        <span className={`h-2 w-2 rounded-full ${tone === "pos" ? "bg-ui-pos" : "bg-ui-neg"}`} />
+        <span className="text-sm font-medium text-ui-fg">{title}</span>
+        <span className="text-xs tabular-nums text-ui-muted">{total}</span>
+      </div>
+      {list.length === 0 ? <p className="mt-2 text-xs text-ui-muted">{empty}</p> : (
+        <ul className="mt-2 divide-y divide-ui-line">
+          {list.map(({ ad, test }) => (
+            <li key={ad.adId}>
+              <button type="button" onClick={() => onOpen({ ad, test })} className="flex w-full items-center gap-3 rounded-lg py-2 text-left hover:bg-ui-raised">
+                <span className="relative h-14 w-11 shrink-0 overflow-hidden rounded-md bg-ui-card">
+                  {ad.imageUrl && (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={img(ad.imageUrl)} alt="" className="h-full w-full object-cover" loading="lazy" />
+                  )}
+                  {ad.video && <span className="absolute inset-0 flex items-center justify-center"><span className="flex h-5 w-5 items-center justify-center rounded-full bg-black/55 text-white"><Play className="h-2.5 w-2.5" fill="currentColor" strokeWidth={0} /></span></span>}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm text-ui-fg">{test}</span>
+                  <span className="block truncate text-[11px] text-ui-muted" title={ad.name}>{creativeLabel(ad)}</span>
+                </span>
+                <span className="shrink-0 text-right tabular-nums">
+                  <span className={`block text-sm font-medium ${tone === "pos" ? "text-ui-pos" : "text-ui-neg"}`}>{ad.conversions > 0 ? `${fmtMoney(ad.cpa, currency)} / conv.` : "0 conversion"}</span>
+                  <span className="block text-[11px] text-ui-muted">{fmtMoney(ad.spend, currency, { digits: 0 })} · {fmtNumber(ad.conversions, 1)} conv.</span>
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {total > list.length && <div className="mt-1 text-[11px] text-ui-muted">+ {total - list.length} autre{total - list.length > 1 ? "s" : ""}, à voir dans les tests ci-dessous</div>}
+    </div>
+  );
+  return (
+    <div>
+      <div className="text-xs font-medium text-ui-fg2">En résumé</div>
+      <p className="mt-1 text-sm leading-6 text-ui-fg">
+        {h.worksTotal} créa{h.worksTotal > 1 ? "s marchent" : " marche"}, {h.failsTotal} ne march{h.failsTotal > 1 ? "ent" : "e"} pas{h.earlyTotal > 0 && <>, {h.earlyTotal} {h.earlyTotal > 1 ? "sont trop récentes" : "est trop récente"} pour conclure</>}.
+      </p>
+      <div className="mt-2 grid gap-3 lg:grid-cols-2">
+        {column("Les créas qui marchent", h.worksTotal, h.works, "pos", "Aucune créa n'a encore assez de conversions au bon coût.")}
+        {column("Les créas qui ne marchent pas", h.failsTotal, h.fails, "neg", "Aucune créa n'est nettement au-dessus du coût de référence.")}
+      </div>
+    </div>
+  );
+}
 
 type SortKey = "name" | "ads" | "spend" | "conversions" | "cpa" | "roas";
 const COLUMNS: Array<{ key: SortKey; label: string }> = [
@@ -311,7 +362,7 @@ export function AbTestsWidget({ widget, period }: { widget: ResolvedWidget; peri
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState<string | null>(null);
   const [format, setFormat] = useState<FormatFilter>("all");
-  const [open, setOpen] = useState<{ a: TestAd; t: AbTest } | null>(null);
+  const [open, setOpen] = useState<{ a: TestAd; t: string } | null>(null);
   // Tests of a format: those with a creative of that format, showing those creatives only.
   const keep = (a: TestAd) => format !== "video" && format !== "image" ? true : a.video === (format === "video");
   const views: FormatFilter[] = ["all", ...(videoCountOf(d.tests) > 0 ? (["video", "image"] as FormatFilter[]) : []), "table", ...((d.breakdowns?.length ?? 0) > 0 ? (["angles"] as FormatFilter[]) : [])];
@@ -351,6 +402,7 @@ export function AbTestsWidget({ widget, period }: { widget: ResolvedWidget; peri
         {d.labo.reference > 0 && <span className="text-xs text-ui-muted">repère : {fmtMoney(d.labo.reference, d.currency)} par conversion ({d.labo.referenceIs === "labo" ? "tous les tests ensemble" : "campagnes du compte qui convertissent"})</span>}
       </div>
 
+      {d.highlights && <Highlights h={d.highlights} currency={d.currency} onOpen={(x) => setOpen({ a: x.ad, t: x.test })} />}
       {(
         <div className="flex flex-wrap items-center gap-1">
           {views.map((f) => (
@@ -370,11 +422,11 @@ export function AbTestsWidget({ widget, period }: { widget: ResolvedWidget; peri
         <Breakdowns list={d.breakdowns ?? []} currency={d.currency} />
       ) : format === "video" ? (
         <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
-          {visible.flatMap(({ t, ads }) => ads.slice(0, AB_TESTS_ADS_SHOWN).map((a) => <VideoCard key={a.adId} a={a} t={t} currency={d.currency} onOpen={() => setOpen({ a, t })} />))}
+          {visible.flatMap(({ t, ads }) => ads.slice(0, AB_TESTS_ADS_SHOWN).map((a) => <VideoCard key={a.adId} a={a} t={t} currency={d.currency} onOpen={() => setOpen({ a, t: t.name })} />))}
         </div>
       ) : (
         <div className="grid gap-3 xl:grid-cols-2">
-          {visible.map(({ t, ads }) => <TestCard key={t.adsetId} t={t} ads={ads} currency={d.currency} onOpen={(a) => setOpen({ a, t })} />)}
+          {visible.map(({ t, ads }) => <TestCard key={t.adsetId} t={t} ads={ads} currency={d.currency} onOpen={(a) => setOpen({ a, t: t.name })} />)}
         </div>
       )}
       {open && (
