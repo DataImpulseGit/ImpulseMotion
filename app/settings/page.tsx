@@ -152,7 +152,7 @@ export default function SettingsPage() {
       </Section>
       )}
 
-      {isStaff && <HookModeCard canEdit={session?.role === "admin"} />}
+      {isStaff && <HookModeCard canEdit={session?.baseRole === "admin"} />}
 
       <Card padded>
         <h2 className="text-sm font-medium text-ui-fg mb-3">Compte</h2>
